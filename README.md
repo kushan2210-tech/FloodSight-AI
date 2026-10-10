@@ -12,8 +12,6 @@ React frontend for a satellite-powered flood damage analysis workflow.
 - Plain CSS
 - Node.js build/server script with esbuild for bundling
 
-No Vite, Next.js, Parcel, Tailwind, or UI component framework is used.
-
 ## Requirements
 
 - Node.js 20 or newer
