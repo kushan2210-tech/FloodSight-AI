@@ -1,3 +1,4 @@
+
 # FloodSight AI — Mapping Flood Damage from Space
 
 React frontend for a satellite-powered flood damage analysis workflow.
@@ -64,3 +65,4 @@ The initial workspace intentionally contains no flood-analysis results. Availabi
 The map uses public OpenStreetMap raster tiles and needs internet access. If it is still blank, open browser DevTools (F12) → Console and Network, reload, and check for blocked tile requests or JavaScript errors. The map resizes when its panel layout changes.
 
 The `API NOT CONNECTED` indicator is expected until a compatible FastAPI backend is running. The frontend does not include that backend. If the API runs on a different port or host, configure `window.FLOODSIGHT_API_BASE_URL` in `index.html` before the app bundle loads, for example `http://127.0.0.1:8000`. The backend must provide `GET /api/analyses` and the other documented `/api/analyses` endpoints, and must allow the frontend origin through CORS. Do not change the indicator to connected unless the backend actually responds.
+
