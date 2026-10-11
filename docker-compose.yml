@@ -1,0 +1,59 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-floodsight}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-floodsight}
+      POSTGRES_DB: ${POSTGRES_DB:-floodsight}
+    volumes:
+      - floodsight-postgres:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-floodsight} -d ${POSTGRES_DB:-floodsight}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ./backend
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-floodsight}:${POSTGRES_PASSWORD:-floodsight}@postgres:5432/${POSTGRES_DB:-floodsight}
+      MODEL_REPO_PATH: ${MODEL_REPO_PATH:-/opt/multimodal-ai}
+    volumes:
+      - ./backend:/app
+      - ./multimodal-ai:/opt/multimodal-ai:ro
+      - floodsight-artifacts:/var/lib/floodsight/artifacts
+      - ./models:/models:ro
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ./backend
+    command: ["python", "-m", "app.workers.analysis_worker"]
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-floodsight}:${POSTGRES_PASSWORD:-floodsight}@postgres:5432/${POSTGRES_DB:-floodsight}
+      MODEL_REPO_PATH: ${MODEL_REPO_PATH:-/opt/multimodal-ai}
+    volumes:
+      - ./backend:/app
+      - ./multimodal-ai:/opt/multimodal-ai:ro
+      - floodsight-artifacts:/var/lib/floodsight/artifacts
+      - ./models:/models:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  floodsight-postgres:
+  floodsight-artifacts:

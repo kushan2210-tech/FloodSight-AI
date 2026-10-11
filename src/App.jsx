@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import maplibregl from 'maplibre-gl';
 import { api } from './api.js';
@@ -40,10 +40,16 @@ function Brand({ light = false }) {
 
 function AppProvider({ children }) {
   const [draft, setDraft] = useState({ location: '', date: '', bbox: null });
-  const [analysisId, setAnalysisId] = useState('');
+  // Restored from sessionStorage so a page reload keeps the active analysis id.
+  const [analysisId, setAnalysisId] = useState(() => sessionStorage.getItem('floodsight-analysis-id') || '');
   const [theme, setTheme] = useState('dark');
   const [profile, setProfile] = useState({ name: '', username: '', email: '' });
-  const value = useMemo(() => ({ draft, setDraft, analysisId, setAnalysisId, theme, setTheme, profile, setProfile }), [draft, analysisId, theme, profile]);
+  const updateAnalysisId = useCallback((value) => {
+    setAnalysisId(value);
+    if (value) sessionStorage.setItem('floodsight-analysis-id', String(value));
+    else sessionStorage.removeItem('floodsight-analysis-id');
+  }, []);
+  const value = useMemo(() => ({ draft, setDraft, analysisId, setAnalysisId: updateAnalysisId, theme, setTheme, profile, setProfile }), [draft, analysisId, theme, profile, updateAnalysisId]);
   return <AppContext.Provider value={value}><div className={`app-shell theme-${theme}`}>{children}</div></AppContext.Provider>;
 }
 
@@ -412,15 +418,19 @@ function ProcessingPage() {
   </AppLayout>;
 }
 function ResultsPage() {
-  const { analysisId, draft } = useApp();
+  const { analysisId, setAnalysisId, draft } = useApp();
   const [facts, setFacts] = useState(null);
   const [mapData, setMapData] = useState(null);
   const [status, setStatus] = useState('');
   const [error, setError] = useState('');
-  useEffect(()=>{if(!analysisId)return;let live=true;Promise.all([api.getFacts(analysisId),api.getMap(analysisId),api.getStatus(analysisId)]).then(([f,m,s])=>{if(live){setFacts(f);setMapData(m);setStatus(s?.status||s?.state||'');}}).catch(e=>{if(live)setError('Results are not available from the backend yet.');});return()=>{live=false}},[analysisId]);
+  // The workspace history links to /results?id=<uuid>; adopt it as the active analysis.
+  const linkedId = new URLSearchParams(useLocation().search).get('id');
+  const activeId = linkedId || analysisId;
+  useEffect(()=>{ if(linkedId && linkedId!==analysisId) setAnalysisId(linkedId); },[linkedId]);
+  useEffect(()=>{if(!activeId)return;let live=true;setError('');Promise.all([api.getFacts(activeId),api.getMap(activeId),api.getStatus(activeId)]).then(([f,m,s])=>{if(live){setFacts(f);setMapData(m);setStatus(s?.status||s?.state||'');}}).catch(e=>{if(live){setFacts(null);setMapData(null);setStatus('');setError('Results are not available from the backend yet.');}});return()=>{live=false}},[activeId]);
   const hasFacts = facts && Object.keys(facts).length;
   return <AppLayout title="Analysis results" subtitle="Only backend-provided facts and geospatial layers are displayed." action={<button className="button button-secondary" onClick={()=>window.print()}><Icon name="file" size={16}/> Print view</button>}>
-    {!analysisId||(!hasFacts&&!mapData)?<div className="results-empty panel"><div className="empty-orbit"><Icon name="layers" size={27}/></div><div className="empty-kicker">RESULTS UNAVAILABLE</div><h2>No analysis results yet</h2><p>{error||'A completed analysis with backend-provided facts and map layers will appear here. No flood extent or impact figures have been generated.'}</p><div className="results-empty-actions"><button className="button button-primary" onClick={()=>window.location.assign('/analyze')}>Start new analysis <Icon name="arrow" size={16}/></button><button className="button button-secondary" onClick={()=>window.location.assign('/workspace')}>Back to workspace</button></div></div>:<><div className="results-meta"><span><b>Analysis ID</b> {analysisId}</span><span><b>Flood date</b> {draft.date||'Backend value unavailable'}</span><span><b>Status</b> {status||'Not provided'}</span></div><div className="results-map-panel panel"><div className="panel-header"><div><h3>Flood and impact layers</h3><p>Layers are drawn only from returned GeoJSON.</p></div></div><div className="results-map"><MapView draft={draft} setDraft={()=>{}} dataLayers={mapData}/></div></div><div className="results-facts-grid">{Object.entries(facts||{}).map(([key,value])=><div className="fact-result panel" key={key}><small>{key.replaceAll('_',' ').toUpperCase()}</small><b>{typeof value==='object'?JSON.stringify(value):String(value??'—')}</b></div>)}</div><button className="button button-secondary" onClick={()=>window.location.assign('/report')}>Open report <Icon name="arrow" size={16}/></button></>}
+    {!activeId||(!hasFacts&&!mapData)?<div className="results-empty panel"><div className="empty-orbit"><Icon name="layers" size={27}/></div><div className="empty-kicker">RESULTS UNAVAILABLE</div><h2>No analysis results yet</h2><p>{error||'A completed analysis with backend-provided facts and map layers will appear here. No flood extent or impact figures have been generated.'}</p><div className="results-empty-actions"><button className="button button-primary" onClick={()=>window.location.assign('/analyze')}>Start new analysis <Icon name="arrow" size={16}/></button><button className="button button-secondary" onClick={()=>window.location.assign('/workspace')}>Back to workspace</button></div></div>:<><div className="results-meta"><span><b>Analysis ID</b> {activeId}</span><span><b>Flood date</b> {draft.date||'Backend value unavailable'}</span><span><b>Status</b> {status||'Not provided'}</span></div><div className="results-map-panel panel"><div className="panel-header"><div><h3>Flood and impact layers</h3><p>Layers are drawn only from returned GeoJSON.</p></div></div><div className="results-map"><MapView draft={draft} setDraft={()=>{}} dataLayers={mapData}/></div></div><div className="results-facts-grid">{Object.entries(facts||{}).map(([key,value])=><div className="fact-result panel" key={key}><small>{key.replaceAll('_',' ').toUpperCase()}</small><b>{typeof value==='object'?JSON.stringify(value):String(value??'—')}</b></div>)}</div><button className="button button-secondary" onClick={()=>window.location.assign('/report?id='+encodeURIComponent(activeId))}>Open report <Icon name="arrow" size={16}/></button></>}
   </AppLayout>;
 }
 
@@ -432,10 +442,13 @@ function ReportsPage() {
 }
 
 function ReportPage() {
-  const { analysisId } = useApp();
+  const { analysisId, setAnalysisId } = useApp();
   const [report, setReport] = useState(null);
   const [error, setError] = useState('');
-  useEffect(()=>{if(!analysisId)return;api.getReport(analysisId).then(setReport).catch(()=>setError('A report has not been returned by the backend.'));},[analysisId]);
+  const linkedId = new URLSearchParams(useLocation().search).get('id');
+  const activeId = linkedId || analysisId;
+  useEffect(()=>{ if(linkedId && linkedId!==analysisId) setAnalysisId(linkedId); },[linkedId]);
+  useEffect(()=>{if(!activeId){setReport(null);return;}setError('');api.getReport(activeId).then(payload=>{setReport(payload?.url||payload?.pdf_url?payload:null);if(!payload?.url&&!payload?.pdf_url)setError('A report has not been returned by the backend.');}).catch(()=>{setReport(null);setError('A report has not been returned by the backend.');});},[activeId]);
   return <AppLayout title="Situation report" subtitle="Open or download the report returned for this analysis."><div className="panel report-detail">{report?.url||report?.pdf_url?<><span className="report-icon large"><Icon name="file" size={24}/></span><h2>{report.title||'FloodSight situation report'}</h2><p>{report.description||'Report generated by the analysis backend.'}</p><div className="report-detail-actions"><a className="button button-primary" href={report.url||report.pdf_url} target="_blank" rel="noreferrer">Open PDF <Icon name="arrow" size={16}/></a>{report.geojson_url&&<a className="button button-secondary" href={report.geojson_url} download>Download GeoJSON</a>}</div></>:<EmptyState icon="file" title="No report available" text={error||'A real PDF report will appear here after the backend provides one.'}/>}</div></AppLayout>;
 }
 

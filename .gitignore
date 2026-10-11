@@ -3,3 +3,19 @@ dist/
 .env
 .env.local
 .DS_Store
+
+# Custom model repository checkout (source of truth for the trained architecture).
+# Clone it separately and point MODEL_REPO_PATH at it; see backend/README.md.
+multimodal-ai/
+
+# Trained checkpoints and datasets are never committed.
+models/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# Generated analysis artifacts
+backend/var/
+*.tif
+*.geotiff
