@@ -6,7 +6,6 @@ dist/
 
 # Custom model repository checkout (source of truth for the trained architecture).
 # Clone it separately and point MODEL_REPO_PATH at it; see backend/README.md.
-multimodal-ai/
 
 # Trained checkpoints and datasets are never committed.
 models/
@@ -19,3 +18,24 @@ checkpoints/
 backend/var/
 *.tif
 *.geotiff
+# Nested model source: include source, exclude nested Git metadata and caches
+multimodal-ai/.git/
+multimodal-ai/__pycache__/
+multimodal-ai/**/__pycache__/
+multimodal-ai/.pytest_cache/
+multimodal-ai/.venv/
+multimodal-ai/venv/
+multimodal-ai/data/raw/
+multimodal-ai/data/processed/
+multimodal-ai/data/terrain/
+multimodal-ai/data/cache/
+multimodal-ai/scene_cache/
+multimodal-ai/*.pt
+multimodal-ai/*.pth
+multimodal-ai/*.ckpt
+multimodal-ai/**/*.pt
+multimodal-ai/**/*.pth
+multimodal-ai/**/*.ckpt
+multimodal-ai/**/*.tif
+multimodal-ai/**/*.tiff
+multimodal-ai/**/*.geotiff
