@@ -23,6 +23,8 @@ htmlcov/
 checkpoints/
 models/
 data/
+# The application's SQLAlchemy models package is source code, not weights.
+!app/models/
 
 # Generated analysis artifacts
 var/

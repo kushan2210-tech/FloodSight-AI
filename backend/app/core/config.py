@@ -39,6 +39,20 @@ class Settings(BaseSettings):
     )
     cors_allow_credentials: bool = False
 
+    # ------------------------------------------------------------ authentication
+    # Server-side sessions: the browser holds an opaque, signed-into-database token
+    # in an HttpOnly cookie. Only a SHA-256 hash of the token is persisted.
+    auth_session_cookie_name: str = "floodsight_session"
+    auth_session_ttl_seconds: int = 60 * 60 * 24 * 7
+    auth_session_cookie_secure: bool = False
+    auth_session_cookie_samesite: str = "lax"
+    auth_session_cookie_domain: str | None = None
+    auth_password_min_length: int = 8
+    auth_password_max_length: int = 128
+    auth_login_max_attempts: int = 5
+    auth_login_lockout_seconds: int = 900
+    auth_login_touch_interval_seconds: int = 60
+
     log_level: str = "INFO"
     log_format: str = "json"
     log_request_body: bool = False
@@ -152,6 +166,21 @@ class Settings(BaseSettings):
     def _resolve_artifact_root(cls, value: Path) -> Path:
         return value.expanduser().resolve()
 
+    @field_validator("auth_session_cookie_samesite")
+    @classmethod
+    def _validate_samesite(cls, value: str) -> str:
+        normalised = value.strip().lower()
+        if normalised not in {"lax", "strict", "none"}:
+            raise ValueError("auth_session_cookie_samesite must be one of lax, strict, none")
+        return normalised
+
+    @field_validator("auth_session_cookie_domain", mode="before")
+    @classmethod
+    def _blank_domain_is_none(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     @field_validator("model_path", mode="before")
     @classmethod
     def _blank_model_path_is_none(cls, value: object) -> object:
@@ -250,6 +279,19 @@ class Settings(BaseSettings):
                 raise ValueError("cors_allow_origins must not contain '*' in production")
             if self.debug:
                 raise ValueError("debug must be disabled in production")
+            # Session cookies must be HTTPS-only in production. Force rather than
+            # fail so a misconfigured deployment cannot silently ship an insecure cookie.
+            self.auth_session_cookie_secure = True
+        if self.auth_session_cookie_samesite == "none" and not self.auth_session_cookie_secure:
+            raise ValueError(
+                "auth_session_cookie_samesite 'none' requires auth_session_cookie_secure"
+            )
+        if self.auth_password_min_length < 8:
+            raise ValueError("auth_password_min_length must be at least 8")
+        if self.auth_password_max_length < self.auth_password_min_length:
+            raise ValueError("auth_password_max_length must be >= auth_password_min_length")
+        if self.auth_login_max_attempts < 1:
+            raise ValueError("auth_login_max_attempts must be at least 1")
         if self.database_pool_size < 1:
             raise ValueError("database_pool_size must be at least 1")
         if not (0 < self.default_page_size <= self.max_page_size):

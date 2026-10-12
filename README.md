@@ -19,9 +19,10 @@ Sentinel-1 radar imagery.
 ### Backend
 
 - FastAPI, Pydantic v2, SQLAlchemy 2.x, Alembic
-- PostgreSQL for analysis records and the job queue
+- PostgreSQL for analysis records, accounts and the job queue
 - Rasterio, Shapely, GeoPandas, NumPy, SciPy for geospatial processing
 - PyTorch for the custom flood segmentation model
+- Argon2id password hashing and server-side sessions in an HttpOnly cookie
 - A dedicated worker process consuming PostgreSQL-backed jobs
 
 ## Repository layout
@@ -29,6 +30,7 @@ Sentinel-1 radar imagery.
 ```
 src/                  React frontend
 build.mjs             esbuild bundler and dev/preview server
+tests/frontend/       Node test-runner checks for the API client, auth flow and bundle
 backend/              FastAPI service, worker and tests
 docker-compose.yml    postgres, api and worker services
 multimodal-ai/        model repository checkout (git-ignored)
@@ -53,7 +55,7 @@ source .venv/bin/activate
 pip install -r backend/requirements.txt
 
 cp backend/.env.example backend/.env     # set MODEL_PATH and MODEL_REPO_PATH
-cd backend && alembic upgrade head && cd ..
+cd backend && alembic upgrade head && cd ..   # creates analysis + auth tables
 
 uvicorn app.main:app --app-dir backend --reload     # http://localhost:8000
 python -m app.workers.analysis_worker               # in a second terminal
@@ -67,7 +69,14 @@ npm run dev
 ```
 
 Open `http://localhost:3000`. The dev server proxies `/api` and `/health` to
-`http://127.0.0.1:8000`, so no frontend configuration is needed for local work.
+`http://127.0.0.1:8000`, forwarding cookies so backend sessions work. Register
+an account from the sign-up screen, or on a fresh database with the API running:
+
+```bash
+curl -i -X POST http://localhost:8000/api/auth/register \
+  -H 'Content-Type: application/json' \
+  --data '{"email":"you@example.org","password":"a-long-password"}'
+```
 
 Full setup, model installation and configuration details are in
 [`backend/README.md`](backend/README.md).
@@ -81,6 +90,23 @@ npm run preview
 
 The production bundle is written to `dist/`. The preview server runs at `http://localhost:4173`.
 
+## Tests
+
+```bash
+npm test          # builds the bundle, then runs the frontend Node tests
+```
+
+The frontend tests cover the API client (endpoint, method, credentials, error and
+`401` handling) and assert the built bundle wires authentication to the backend
+and contains no `sessionStorage` proof-of-login. With the API running, a live
+end-to-end check exercises register → me → logout → denied through the dev proxy:
+
+```bash
+FLOODSIGHT_E2E_BASE_URL=http://localhost:3000 node --test tests/frontend/*.test.mjs
+```
+
+Backend tests use a dedicated test database; see [`backend/README.md`](backend/README.md).
+
 ## Map and API connection
 
 The interactive map uses public OpenStreetMap raster tiles and opens centered on Kerala for the initial New Analysis screen. It supports zooming, panning, and drawing the area-of-interest bounding box. Tile/network failures show a visible map warning instead of leaving a silent blank panel. Map tiles require an internet connection.
@@ -91,6 +117,10 @@ The API client uses same-origin `/api/...` by default. To configure a separate b
 
 Endpoints consumed by the frontend:
 
+- `POST /api/auth/register`
+- `POST /api/auth/login`
+- `POST /api/auth/logout`
+- `GET /api/auth/me`
 - `POST /api/analyses`
 - `GET /api/analyses`
 - `GET /api/analyses/{id}`
@@ -99,11 +129,26 @@ Endpoints consumed by the frontend:
 - `GET /api/analyses/{id}/map`
 - `GET /api/analyses/{id}/report`
 
-`POST /api/analyses` returns `202 Accepted` once the job is recorded; the frontend then polls `status` until a terminal state and only then reads `facts`, `map` and `report`. The active analysis identifier is kept in `sessionStorage`, so reloading the page or opening `/results?id=<uuid>` from the analysis history continues to show the same analysis.
+`POST /api/analyses` returns `202 Accepted` once the job is recorded; the frontend then polls `status` until a terminal state and only then reads `facts`, `map` and `report`. The active analysis identifier is kept in `sessionStorage`, so reloading the page or opening `/results?id=<uuid>` from the analysis history continues to show the same analysis. That identifier is UI state only — it is not a credential.
+
+## Authentication
+
+The frontend signs in against the backend; it does not simulate a session. The
+sign-up and login forms `POST` to `/api/auth/register` and `/api/auth/login`, the
+backend sets an `HttpOnly` session cookie, and the app calls `GET /api/auth/me` on
+load to restore the user. Route guards render a "verifying session" state until
+`/api/auth/me` answers, so the UI never reports a user that the backend has not
+confirmed. Any `401` from the API clears local auth state and returns the user to
+`/login`, and logout calls the backend to revoke the session before clearing it.
+
+No credential is stored in `localStorage` or `sessionStorage`; the browser holds
+only the session cookie, which JavaScript cannot read. Passwords are hashed with
+Argon2id and never returned. See [`backend/README.md`](backend/README.md) for the
+cookie flags, session lifetime, CSRF origin checks and login-attempt lockout.
 
 ## Data integrity
 
-The frontend contains no flood-analysis results of its own. Availability checks, processing state, result facts, map layers, and reports all come from the backend. No flood polygons or impact metrics are fabricated in the browser.
+The frontend contains no flood-analysis results of its own. Availability checks, processing state, result facts, map layers, and reports all come from the backend. No flood polygons or impact metrics are fabricated in the browser. Authentication is real too: credentials are verified by the backend and the session is a server-side cookie, never a browser flag that the UI sets on its own.
 
 Flood extents displayed on the map are model predictions derived from Sentinel-1 radar imagery. They are not confirmed ground truth, and the interface states this wherever results are presented. Infrastructure layers show OpenStreetMap features that intersect the predicted extent; intersection indicates exposure, not confirmed damage.
 

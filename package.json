@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "node build.mjs dev",
     "build": "node build.mjs build",
-    "preview": "node build.mjs preview"
+    "preview": "node build.mjs preview",
+    "test": "node build.mjs build && node --test tests/frontend/*.test.mjs"
   },
   "dependencies": {
     "maplibre-gl": "^5.6.2",

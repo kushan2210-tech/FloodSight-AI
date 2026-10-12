@@ -12,6 +12,9 @@ sqlalchemy==2.0.45
 psycopg[binary]==3.2.10
 alembic==1.17.1
 
+# Authentication
+argon2-cffi==25.1.0
+
 # Custom flood segmentation model
 # CPU wheels are sufficient; install from the CUDA index for GPU inference:
 #   pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cu124

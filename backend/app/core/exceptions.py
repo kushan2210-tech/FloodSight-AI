@@ -78,6 +78,21 @@ class CapacityError(FloodSightError):
     status_code = status.HTTP_429_TOO_MANY_REQUESTS
 
 
+class AuthenticationError(FloodSightError):
+    code = "unauthenticated"
+    status_code = status.HTTP_401_UNAUTHORIZED
+
+
+class ForbiddenError(FloodSightError):
+    code = "forbidden"
+    status_code = status.HTTP_403_FORBIDDEN
+
+
+class RateLimitError(FloodSightError):
+    code = "too_many_requests"
+    status_code = status.HTTP_429_TOO_MANY_REQUESTS
+
+
 class DependencyError(FloodSightError):
     code = "dependency_unavailable"
     status_code = status.HTTP_503_SERVICE_UNAVAILABLE

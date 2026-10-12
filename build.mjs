@@ -46,6 +46,11 @@ async function proxy(req, res, pathname, search) {
   // Only forward a body content type on methods that actually carry a body.
   if (body && req.headers['content-type']) headers['content-type'] = req.headers['content-type'];
   if (req.headers.authorization) headers.authorization = req.headers.authorization;
+  // Session auth: carry the HttpOnly cookie and the declared origin through the proxy
+  // so server-side sessions and origin checks behave exactly as if the API were same-origin.
+  if (req.headers.cookie) headers.cookie = req.headers.cookie;
+  if (req.headers.origin) headers.origin = req.headers.origin;
+  if (req.headers.referer) headers.referer = req.headers.referer;
   try {
     const upstream = await fetch(target, { method: req.method, headers, body, redirect: 'manual' });
     const payload = Buffer.from(await upstream.arrayBuffer());
@@ -54,6 +59,9 @@ async function proxy(req, res, pathname, search) {
       const value = upstream.headers.get(key);
       if (value) out[key] = value;
     }
+    // Set-Cookie must survive the proxy or the browser never receives the session cookie.
+    const setCookies = typeof upstream.headers.getSetCookie === 'function' ? upstream.headers.getSetCookie() : [];
+    if (setCookies.length) out['set-cookie'] = setCookies;
     res.writeHead(upstream.status, out);
     res.end(payload);
   } catch {

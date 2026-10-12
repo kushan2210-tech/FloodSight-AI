@@ -44,38 +44,96 @@ function AppProvider({ children }) {
   const [analysisId, setAnalysisId] = useState(() => sessionStorage.getItem('floodsight-analysis-id') || '');
   const [theme, setTheme] = useState('dark');
   const [profile, setProfile] = useState({ name: '', username: '', email: '' });
+  // Authentication is only ever confirmed by the backend. Until /api/auth/me answers
+  // the status stays 'loading' so the UI never reports a user that is not signed in.
+  const [auth, setAuth] = useState({ status: 'loading', user: null });
   const updateAnalysisId = useCallback((value) => {
     setAnalysisId(value);
     if (value) sessionStorage.setItem('floodsight-analysis-id', String(value));
     else sessionStorage.removeItem('floodsight-analysis-id');
   }, []);
-  const value = useMemo(() => ({ draft, setDraft, analysisId, setAnalysisId: updateAnalysisId, theme, setTheme, profile, setProfile }), [draft, analysisId, theme, profile, updateAnalysisId]);
+  const applyUser = useCallback((user) => {
+    if (!user) {
+      setProfile({ name: '', username: '', email: '' });
+      setAuth({ status: 'anonymous', user: null });
+      return;
+    }
+    setProfile({ name: user.full_name || '', username: (user.email || '').split('@')[0], email: user.email || '' });
+    setAuth({ status: 'authenticated', user });
+  }, []);
+  const refreshAuth = useCallback(async () => {
+    try {
+      const user = await api.me();
+      applyUser(user);
+      return user;
+    } catch {
+      applyUser(null);
+      return null;
+    }
+  }, [applyUser]);
+  useEffect(() => { refreshAuth(); }, [refreshAuth]);
+  useEffect(() => {
+    const onUnauthorized = () => applyUser(null);
+    window.addEventListener('floodsight:unauthorized', onUnauthorized);
+    return () => window.removeEventListener('floodsight:unauthorized', onUnauthorized);
+  }, [applyUser]);
+  const login = useCallback(async (credentials) => {
+    const data = await api.login(credentials);
+    applyUser(data && data.user);
+    return data && data.user;
+  }, [applyUser]);
+  const signup = useCallback(async (payload) => {
+    const data = await api.register(payload);
+    applyUser(data && data.user);
+    return data && data.user;
+  }, [applyUser]);
+  const logout = useCallback(async () => {
+    try {
+      await api.logout();
+    } catch {
+      // The backend may already consider the session gone; clear local state regardless.
+    }
+    applyUser(null);
+  }, [applyUser]);
+  const value = useMemo(() => ({ draft, setDraft, analysisId, setAnalysisId: updateAnalysisId, theme, setTheme, profile, setProfile, auth, login, signup, logout, refreshAuth }), [draft, analysisId, theme, profile, auth, login, signup, logout, refreshAuth, updateAnalysisId]);
   return <AppContext.Provider value={value}><div className={`app-shell theme-${theme}`}>{children}</div></AppContext.Provider>;
 }
 
-function RequireAccess({ children }) {
+function AuthLoading() {
+  return <div role="status" aria-live="polite" style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.75rem' }}><span className="status-pill"><i/> VERIFYING SESSION</span></div>;
+}
+
+function RequireAuth({ children }) {
+  const { auth } = useApp();
   const location = useLocation();
-  const allowed = sessionStorage.getItem('floodsight-access') === 'yes';
-  if (!allowed && !['/login','/signup'].includes(location.pathname)) return <Navigate to="/login" replace />;
+  if (auth.status === 'loading') return <AuthLoading/>;
+  if (auth.status !== 'authenticated') return <Navigate to="/login" replace state={{ from: location.pathname + location.search }} />;
+  return children;
+}
+
+function PublicOnly({ children }) {
+  const { auth } = useApp();
+  if (auth.status === 'loading') return <AuthLoading/>;
+  if (auth.status === 'authenticated') return <Navigate to="/workspace" replace/>;
   return children;
 }
 
 export default function App() {
   return <AppProvider><Routes>
-    <Route path="/" element={<Navigate to="/login" replace/>}/>
-    <Route path="/login" element={<AuthPage mode="login"/>}/>
-    <Route path="/signup" element={<AuthPage mode="signup"/>}/>
-    <Route path="/intro" element={<RequireAccess><IntroPage/></RequireAccess>}/>
-    <Route path="/workspace" element={<RequireAccess><WorkspacePage/></RequireAccess>}/>
-    <Route path="/analyze" element={<RequireAccess><AnalyzePage/></RequireAccess>}/>
-    <Route path="/review" element={<RequireAccess><ReviewPage/></RequireAccess>}/>
-    <Route path="/data-check" element={<RequireAccess><DataCheckPage/></RequireAccess>}/>
-    <Route path="/analysis" element={<RequireAccess><ProcessingPage/></RequireAccess>}/>
-    <Route path="/results" element={<RequireAccess><ResultsPage/></RequireAccess>}/>
+    <Route path="/" element={<Navigate to="/workspace" replace/>}/>
+    <Route path="/login" element={<PublicOnly><AuthPage mode="login"/></PublicOnly>}/>
+    <Route path="/signup" element={<PublicOnly><AuthPage mode="signup"/></PublicOnly>}/>
+    <Route path="/intro" element={<RequireAuth><IntroPage/></RequireAuth>}/>
+    <Route path="/workspace" element={<RequireAuth><WorkspacePage/></RequireAuth>}/>
+    <Route path="/analyze" element={<RequireAuth><AnalyzePage/></RequireAuth>}/>
+    <Route path="/review" element={<RequireAuth><ReviewPage/></RequireAuth>}/>
+    <Route path="/data-check" element={<RequireAuth><DataCheckPage/></RequireAuth>}/>
+    <Route path="/analysis" element={<RequireAuth><ProcessingPage/></RequireAuth>}/>
+    <Route path="/results" element={<RequireAuth><ResultsPage/></RequireAuth>}/>
     <Route path="/dashboard" element={<Navigate to="/workspace" replace/>}/>
-    <Route path="/reports" element={<RequireAccess><ReportsPage/></RequireAccess>}/>
-    <Route path="/report" element={<RequireAccess><ReportPage/></RequireAccess>}/>
-    <Route path="/settings" element={<RequireAccess><SettingsPage/></RequireAccess>}/>
+    <Route path="/reports" element={<RequireAuth><ReportsPage/></RequireAuth>}/>
+    <Route path="/report" element={<RequireAuth><ReportPage/></RequireAuth>}/>
+    <Route path="/settings" element={<RequireAuth><SettingsPage/></RequireAuth>}/>
     <Route path="*" element={<Navigate to="/login" replace/>}/>
   </Routes></AppProvider>;
 }
@@ -85,19 +143,30 @@ function AuthPage({ mode }) {
   const [showPassword, setShowPassword] = useState(false);
   const [remember, setRemember] = useState(true);
   const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
   const [form, setForm] = useState({ name: '', email: '', password: '', confirm: '' });
   const navigate = useNavigate();
-  const { setProfile } = useApp();
-  const submit = (e) => {
-    e.preventDefault(); setError('');
-    if (!form.email.trim() || !form.password) return setError('Enter your email and password to continue.');
+  const location = useLocation();
+  const { login, signup: register } = useApp();
+  const submit = async (e) => {
+    e.preventDefault();
+    if (submitting) return;
+    setError('');
+    const email = form.email.trim();
+    if (!email || !form.password) return setError('Enter your email and password to continue.');
     if (signup && !form.name.trim()) return setError('Enter your full name to create an account.');
     if (signup && form.password !== form.confirm) return setError('Passwords do not match.');
-    if (form.password.length < 6) return setError('Use a password with at least 6 characters.');
-    setProfile({ name: form.name, username: form.email.split('@')[0], email: form.email });
-    sessionStorage.setItem('floodsight-access', 'yes');
-    if (remember) sessionStorage.setItem('floodsight-remember', 'yes');
-    navigate('/intro');
+    if (signup && form.password.length < 8) return setError('Use a password with at least 8 characters.');
+    setSubmitting(true);
+    try {
+      if (signup) await register({ email, password: form.password, full_name: form.name.trim() });
+      else await login({ email, password: form.password, remember });
+      const from = location.state && location.state.from ? location.state.from : '/intro';
+      navigate(from, { replace: true });
+    } catch (err) {
+      setError((err && err.message) ? err.message : 'Something went wrong. Please try again.');
+      setSubmitting(false);
+    }
   };
   return <main className="auth-page">
     <div className="auth-visual">
@@ -123,15 +192,15 @@ function AuthPage({ mode }) {
         <p className="form-subtitle">{signup ? 'Create an account to access your flood intelligence workspace.' : 'Access your flood intelligence workspace.'}</p>
         <form onSubmit={submit} className="auth-form">
           {signup && <label>Full Name<input autoComplete="name" placeholder="Your full name" value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/></label>}
-          <label>{signup ? 'Email' : 'Email or Username'}<input autoComplete="username" type={signup ? 'email' : 'text'} placeholder={signup ? 'you@organization.org' : 'Enter your email or username'} value={form.email} onChange={e=>setForm({...form,email:e.target.value})}/></label>
+          <label>Email<input autoComplete="username" type="email" placeholder="you@organization.org" value={form.email} onChange={e=>setForm({...form,email:e.target.value})}/></label>
           <label>Password<div className="password-field"><input autoComplete={signup ? 'new-password' : 'current-password'} type={showPassword ? 'text' : 'password'} placeholder="Enter your password" value={form.password} onChange={e=>setForm({...form,password:e.target.value})}/><button className="icon-button" type="button" aria-label={showPassword ? 'Hide password' : 'Show password'} onClick={()=>setShowPassword(!showPassword)}><Icon name={showPassword ? 'eyeOff' : 'eye'}/></button></div></label>
           {signup && <label>Confirm Password<input autoComplete="new-password" type={showPassword ? 'text' : 'password'} placeholder="Confirm your password" value={form.confirm} onChange={e=>setForm({...form,confirm:e.target.value})}/></label>}
-          {!signup && <div className="form-options"><label className="check-label"><input type="checkbox" checked={remember} onChange={e=>setRemember(e.target.checked)}/> <span>Remember me</span></label><button type="button" className="text-button" onClick={()=>setError('Password recovery will be available when authentication is connected.')}>Forgot password?</button></div>}
+          {!signup && <div className="form-options"><label className="check-label"><input type="checkbox" checked={remember} onChange={e=>setRemember(e.target.checked)}/> <span>Remember me</span></label><button type="button" className="text-button" onClick={()=>setError('Password recovery is not available in this build.')}>Forgot password?</button></div>}
           {error && <div className="form-error" role="alert">{error}</div>}
-          <button className="button button-primary button-full" type="submit">{signup ? 'Create Account' : 'Login'} <Icon name="arrow" size={17}/></button>
+          <button className="button button-primary button-full" type="submit" disabled={submitting}>{submitting ? 'Please wait…' : (signup ? 'Create Account' : 'Login')} <Icon name="arrow" size={17}/></button>
         </form>
         <div className="or-divider"><span></span><small>OR</small><span></span></div>
-        <button className="button button-google button-full" onClick={()=>setError('Google sign-in will be available when an authentication provider is connected.')}><span className="google-g">G</span>Continue with Google</button>
+        <button className="button button-google button-full" onClick={()=>setError('Google sign-in is not available in this build.')}><span className="google-g">G</span>Continue with Google</button>
         <p className="auth-switch">{signup ? 'Already have an account?' : "Don't have an account?"} <NavLink to={signup ? '/login' : '/signup'}>{signup ? 'Log in' : 'Sign up'}</NavLink></p>
       </div>
       <div className="auth-panel-footer"><span>© 2026 FLOODSIGHT AI</span><span>PRIVACY-FIRST · EARTH OBSERVATION</span></div>
@@ -285,8 +354,9 @@ function syncBox(map, bbox) {
 function AppLayout({ children, active, title, subtitle, action }) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [apiConnection, setApiConnection] = useState('checking');
-  const { profile } = useApp();
+  const { profile, logout } = useApp();
   const navigate = useNavigate();
+  const signOut = useCallback(async () => { await logout(); navigate('/login', { replace: true }); }, [logout, navigate]);
   useEffect(() => {
     let active = true;
     api.listAnalyses().then(() => { if (active) setApiConnection('connected'); })
@@ -294,7 +364,7 @@ function AppLayout({ children, active, title, subtitle, action }) {
     return () => { active = false; };
   }, []);
   const navItems = [{ to: '/workspace', icon: 'grid', label: 'Workspace' }, { to: '/workspace?view=analyses', icon: 'clock', label: 'My Analyses' }, { to: '/reports', icon: 'file', label: 'Reports' }];
-  const nav = <><div className="sidebar-brand"><Brand/></div><button className="button button-primary sidebar-new" onClick={()=>navigate('/analyze')}><Icon name="plus" size={17}/> New Analysis</button><div className="sidebar-label">WORKSPACE</div><nav className="sidebar-nav">{navItems.map(item=><NavLink key={item.label} to={item.to} className={({isActive})=>`side-link ${((item.label==='Workspace'&&active==='workspace')||(item.label==='My Analyses'&&active==='analyses')||(item.label==='Reports'&&active==='reports'))?'active':''}`}><Icon name={item.icon}/><span>{item.label}</span>{item.label==='My Analyses'&&<span className="nav-count">0</span>}</NavLink>)}</nav><div className="sidebar-spacer"/><div className="sidebar-bottom"><NavLink to="/settings" className={({isActive})=>`side-link ${active==='settings'?'active':''}`}><Icon name="settings"/><span>Settings</span></NavLink><div className="sidebar-user"><div className="user-avatar">{(profile.name||profile.email||'F').slice(0,1).toUpperCase()}</div><div><b>{profile.name || 'FloodSight User'}</b><small>{profile.email || 'Workspace account'}</small></div><button className="icon-button" title="Log out" onClick={()=>{sessionStorage.removeItem('floodsight-access');navigate('/login')}}><Icon name="logout" size={16}/></button></div></div></>;
+  const nav = <><div className="sidebar-brand"><Brand/></div><button className="button button-primary sidebar-new" onClick={()=>navigate('/analyze')}><Icon name="plus" size={17}/> New Analysis</button><div className="sidebar-label">WORKSPACE</div><nav className="sidebar-nav">{navItems.map(item=><NavLink key={item.label} to={item.to} className={({isActive})=>`side-link ${((item.label==='Workspace'&&active==='workspace')||(item.label==='My Analyses'&&active==='analyses')||(item.label==='Reports'&&active==='reports'))?'active':''}`}><Icon name={item.icon}/><span>{item.label}</span>{item.label==='My Analyses'&&<span className="nav-count">0</span>}</NavLink>)}</nav><div className="sidebar-spacer"/><div className="sidebar-bottom"><NavLink to="/settings" className={({isActive})=>`side-link ${active==='settings'?'active':''}`}><Icon name="settings"/><span>Settings</span></NavLink><div className="sidebar-user"><div className="user-avatar">{(profile.name||profile.email||'F').slice(0,1).toUpperCase()}</div><div><b>{profile.name || 'FloodSight User'}</b><small>{profile.email || 'Workspace account'}</small></div><button className="icon-button" title="Log out" onClick={signOut}><Icon name="logout" size={16}/></button></div></div></>;
   return <div className="product-layout"><aside className={`sidebar ${mobileOpen?'sidebar-open':''}`}>{nav}</aside>{mobileOpen&&<button className="mobile-scrim" onClick={()=>setMobileOpen(false)} aria-label="Close menu"/>}<div className="product-main"><header className="topbar"><button className="mobile-menu icon-button" onClick={()=>setMobileOpen(!mobileOpen)} aria-label="Toggle menu"><Icon name={mobileOpen?'close':'menu'}/></button><div className="breadcrumb"><span>FLOODSIGHT</span><Icon name="chevron" size={14}/><b>{title}</b></div><div className="topbar-right"><span className={`connection-state connection-${apiConnection}`} title={apiConnection === 'connected' ? 'Analysis backend responded successfully' : apiConnection === 'checking' ? 'Checking analysis backend connection' : 'Analysis backend unavailable; backend-dependent features cannot run'}><i/> {apiConnection === 'connected' ? 'API CONNECTED' : apiConnection === 'checking' ? 'CHECKING API' : 'API NOT CONNECTED'}</span><div className="topbar-avatar">{(profile.name||profile.email||'F').slice(0,1).toUpperCase()}</div></div></header><main className="page-content">{(title||subtitle||action)&&<div className="page-heading"><div><div className="section-kicker">FLOODSIGHT WORKSPACE</div><h1>{title}</h1>{subtitle&&<p>{subtitle}</p>}</div>{action}</div>}{children}</main><footer className="product-footer"><span>FLOODSIGHT AI <span className="footer-separator">/</span> FLOOD INTELLIGENCE</span><span>Results are only shown when supplied by the analysis backend.</span></footer></div></div>;
 }
 
@@ -428,9 +498,9 @@ function ResultsPage() {
   const activeId = linkedId || analysisId;
   useEffect(()=>{ if(linkedId && linkedId!==analysisId) setAnalysisId(linkedId); },[linkedId]);
   useEffect(()=>{if(!activeId)return;let live=true;setError('');Promise.all([api.getFacts(activeId),api.getMap(activeId),api.getStatus(activeId)]).then(([f,m,s])=>{if(live){setFacts(f);setMapData(m);setStatus(s?.status||s?.state||'');}}).catch(e=>{if(live){setFacts(null);setMapData(null);setStatus('');setError('Results are not available from the backend yet.');}});return()=>{live=false}},[activeId]);
-  const hasFacts = facts && Object.keys(facts).length;
+  const resultsReady = facts?.results_ready === true;
   return <AppLayout title="Analysis results" subtitle="Only backend-provided facts and geospatial layers are displayed." action={<button className="button button-secondary" onClick={()=>window.print()}><Icon name="file" size={16}/> Print view</button>}>
-    {!activeId||(!hasFacts&&!mapData)?<div className="results-empty panel"><div className="empty-orbit"><Icon name="layers" size={27}/></div><div className="empty-kicker">RESULTS UNAVAILABLE</div><h2>No analysis results yet</h2><p>{error||'A completed analysis with backend-provided facts and map layers will appear here. No flood extent or impact figures have been generated.'}</p><div className="results-empty-actions"><button className="button button-primary" onClick={()=>window.location.assign('/analyze')}>Start new analysis <Icon name="arrow" size={16}/></button><button className="button button-secondary" onClick={()=>window.location.assign('/workspace')}>Back to workspace</button></div></div>:<><div className="results-meta"><span><b>Analysis ID</b> {activeId}</span><span><b>Flood date</b> {draft.date||'Backend value unavailable'}</span><span><b>Status</b> {status||'Not provided'}</span></div><div className="results-map-panel panel"><div className="panel-header"><div><h3>Flood and impact layers</h3><p>Layers are drawn only from returned GeoJSON.</p></div></div><div className="results-map"><MapView draft={draft} setDraft={()=>{}} dataLayers={mapData}/></div></div><div className="results-facts-grid">{Object.entries(facts||{}).map(([key,value])=><div className="fact-result panel" key={key}><small>{key.replaceAll('_',' ').toUpperCase()}</small><b>{typeof value==='object'?JSON.stringify(value):String(value??'—')}</b></div>)}</div><button className="button button-secondary" onClick={()=>window.location.assign('/report?id='+encodeURIComponent(activeId))}>Open report <Icon name="arrow" size={16}/></button></>}
+    {!activeId||!resultsReady?<div className="results-empty panel"><div className="empty-orbit"><Icon name="layers" size={27}/></div><div className="empty-kicker">RESULTS UNAVAILABLE</div><h2>No analysis results yet</h2><p>{error||'A completed analysis with backend-provided facts and map layers will appear here. No flood extent or impact figures have been generated.'}</p><div className="results-empty-actions"><button className="button button-primary" onClick={()=>window.location.assign('/analyze')}>Start new analysis <Icon name="arrow" size={16}/></button><button className="button button-secondary" onClick={()=>window.location.assign('/workspace')}>Back to workspace</button></div></div>:<><div className="results-meta"><span><b>Analysis ID</b> {activeId}</span><span><b>Flood date</b> {draft.date||'Backend value unavailable'}</span><span><b>Status</b> {status||'Not provided'}</span></div><div className="results-map-panel panel"><div className="panel-header"><div><h3>Flood and impact layers</h3><p>Layers are drawn only from returned GeoJSON.</p></div></div><div className="results-map"><MapView draft={draft} setDraft={()=>{}} dataLayers={mapData}/></div></div><div className="results-facts-grid">{Object.entries(facts||{}).map(([key,value])=><div className="fact-result panel" key={key}><small>{key.replaceAll('_',' ').toUpperCase()}</small><b>{typeof value==='object'?JSON.stringify(value):String(value??'—')}</b></div>)}</div><button className="button button-secondary" onClick={()=>window.location.assign('/report?id='+encodeURIComponent(activeId))}>Open report <Icon name="arrow" size={16}/></button></>}
   </AppLayout>;
 }
 
@@ -453,18 +523,19 @@ function ReportPage() {
 }
 
 function SettingsPage() {
-  const { theme, setTheme, profile, setProfile } = useApp();
+  const { theme, setTheme, profile, setProfile, logout } = useApp();
   const [appearance, setAppearance] = useState('Muted');
   const [mapStyle, setMapStyle] = useState('Standard');
   const [saved, setSaved] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const navigate = useNavigate();
+  const signOut = useCallback(async () => { await logout(); navigate('/login', { replace: true }); }, [logout, navigate]);
   const save = (e)=>{e.preventDefault();setSaved(true);setTimeout(()=>setSaved(false),2400)};
   return <AppLayout active="settings" title="Settings" subtitle="Personalize your workspace and manage account preferences."><div className="settings-layout"><section className="settings-main">
     <form className="panel settings-panel" onSubmit={save}><div className="settings-section-heading"><span className="settings-icon"><Icon name="layers"/></span><div><h3>General / Personalization</h3><p>Adjust how FloodSight appears on your device.</p></div></div><div className="setting-row"><div><b>Appearance</b><small>Choose your workspace theme.</small></div><div className="segmented"><button type="button" className={theme==='dark'?'selected':''} onClick={()=>setTheme('dark')}>Dark</button><button type="button" className={theme==='light'?'selected':''} onClick={()=>setTheme('light')}>Light</button></div></div><div className="setting-row"><div><b>Map appearance</b><small>Base map presentation.</small></div><select value={mapStyle} onChange={e=>setMapStyle(e.target.value)}><option>Standard</option><option>Muted</option><option>High contrast</option></select></div><div className="setting-row"><div><b>Contrast / Accent</b><small>Choose a restrained interface accent.</small></div><select value={appearance} onChange={e=>setAppearance(e.target.value)}><option>Muted</option><option>Cyan</option><option>Blue</option></select></div><div className="settings-save"><button className="button button-primary" type="submit">Save preferences</button>{saved&&<span className="save-confirm"><Icon name="check" size={15}/> Preferences saved for this session</span>}</div></form>
     <form className="panel settings-panel" onSubmit={save}><div className="settings-section-heading"><span className="settings-icon"><Icon name="globe"/></span><div><h3>Account</h3><p>Update the profile details shown in your workspace.</p></div></div><div className="settings-form-grid"><label>Name<input value={profile.name} onChange={e=>setProfile({...profile,name:e.target.value})} placeholder="Full name"/></label><label>Username<input value={profile.username} onChange={e=>setProfile({...profile,username:e.target.value})} placeholder="Username"/></label><label className="span-2">Email<input type="email" value={profile.email} onChange={e=>setProfile({...profile,email:e.target.value})} placeholder="Email address"/></label></div><div className="settings-save"><button className="button button-primary" type="submit">Save Profile</button>{saved&&<span className="save-confirm"><Icon name="check" size={15}/> Profile saved for this session</span>}</div></form>
-    <section className="panel settings-panel"><div className="settings-section-heading"><span className="settings-icon"><Icon name="shield"/></span><div><h3>Security & Login</h3><p>Account security controls.</p></div></div><div className="setting-row"><div><b>Verified email</b><small>{profile.email?'Email has not been verified by an authentication provider.':'No email address on profile.'}</small></div><span className="neutral-chip">Not verified</span></div><div className="setting-row"><div><b>Change password</b><small>Password management requires connected authentication.</small></div><button className="button button-secondary button-small" onClick={()=>setShowPassword(!showPassword)}>{showPassword?'Hide':'Change password'}</button></div>{showPassword&&<div className="notice notice-info"><Icon name="alert" size={16}/> Password changes are not enabled until an authentication provider is connected.</div>}<div className="setting-row"><div><b>Active session</b><small>This browser session is currently active.</small></div><span className="active-chip"><i/> Active</span></div><div className="setting-row"><div><b>Log out all devices</b><small>End this local session. Other devices cannot be controlled without an auth backend.</small></div><button className="button button-danger-outline button-small" onClick={()=>{sessionStorage.removeItem('floodsight-access');navigate('/login')}}>Log out</button></div></section>
-  </section><aside className="settings-aside panel"><span className="settings-aside-icon"><Icon name="shield" size={22}/></span><h3>Your workspace, your way</h3><p>These preferences are local to this browser session. Connect an authentication service and persistence layer to sync account settings across devices.</p><div className="settings-aside-line"/><div className="aside-info-row"><span>Theme</span><b>{theme==='dark'?'Dark':'Light'}</b></div><div className="aside-info-row"><span>Map style</span><b>{mapStyle}</b></div><div className="aside-info-row"><span>Accent</span><b>{appearance}</b></div></aside></div></AppLayout>;
+    <section className="panel settings-panel"><div className="settings-section-heading"><span className="settings-icon"><Icon name="shield"/></span><div><h3>Security & Login</h3><p>Account security controls.</p></div></div><div className="setting-row"><div><b>Verified email</b><small>{profile.email?'Email verification is not implemented in this build.':'No email address on profile.'}</small></div><span className="neutral-chip">Not verified</span></div><div className="setting-row"><div><b>Change password</b><small>Password changes are not available yet.</small></div><button className="button button-secondary button-small" onClick={()=>setShowPassword(!showPassword)}>{showPassword?'Hide':'Change password'}</button></div>{showPassword&&<div className="notice notice-info"><Icon name="alert" size={16}/> Password changes are not available in this build.</div>}<div className="setting-row"><div><b>Active session</b><small>This browser has a verified session with the backend.</small></div><span className="active-chip"><i/> Active</span></div><div className="setting-row"><div><b>Log out all devices</b><small>End the current session on this browser.</small></div><button className="button button-danger-outline button-small" onClick={signOut}>Log out</button></div></section>
+  </section><aside className="settings-aside panel"><span className="settings-aside-icon"><Icon name="shield" size={22}/></span><h3>Your workspace, your way</h3><p>These preferences are stored locally in this browser. Account settings are not synced across devices yet.</p><div className="settings-aside-line"/><div className="aside-info-row"><span>Theme</span><b>{theme==='dark'?'Dark':'Light'}</b></div><div className="aside-info-row"><span>Map style</span><b>{mapStyle}</b></div><div className="aside-info-row"><span>Accent</span><b>{appearance}</b></div></aside></div></AppLayout>;
 }
 
 function EmptyState({ icon = 'layers', title, text, actionLabel, onAction }) {

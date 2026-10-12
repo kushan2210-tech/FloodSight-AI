@@ -18,12 +18,15 @@ app/
     enums.py                  lifecycle, job and failure codes with a transition table
     exceptions.py             typed errors and sanitised API responses
     logging.py                structured JSON / text logging with request ids
+    security.py               Argon2id hashing and opaque session tokens
   api/
     router.py                 route registration
     routes/health.py          liveness, readiness, prediction provider readiness
     routes/analyses.py        the analysis endpoints
+    routes/auth.py            register, login, logout and current-user endpoints
   schemas/                    Pydantic request and response contracts
-  models/analysis.py          SQLAlchemy 2.x tables
+  models/analysis.py          SQLAlchemy 2.x analysis tables
+  models/user.py              SQLAlchemy 2.x user, session and login-attempt tables
   repositories/               database access
   services/
     prediction_providers.py   PredictionProvider contract, trained and synthetic providers
@@ -35,6 +38,7 @@ app/
     result_service.py         facts and map payloads
     report_service.py         PDF situation report
     analysis_service.py       create and lifecycle operations
+    auth_service.py           registration, sign-in, sessions and lockout
     damage_assessment_service.py  OpenStreetMap exposure context
   processing/
     pipeline.py               ordered processing stages
@@ -260,11 +264,15 @@ curl -s http://127.0.0.1:8000/health/ready/capabilities | python -m json.tool
 
 ### Tests
 
+Tests drop and recreate the schema; use a dedicated test database, not the
+development one:
+
 ```bash
 cd backend
 source ../.venv/bin/activate
-DATABASE_URL=postgresql+psycopg://floodsight:floodsight@127.0.0.1:5432/floodsight \
-  python -m pytest tests/
+export DATABASE_URL=postgresql+psycopg://floodsight:floodsight@127.0.0.1:5433/floodsight_test
+export TEST_DATABASE_URL="$DATABASE_URL"
+python -m pytest tests/
 ```
 
 Database tests skip automatically when PostgreSQL is unreachable. No test
@@ -296,6 +304,15 @@ Every setting is an environment variable; see `.env.example` for the full list.
 | `OSM_ENDPOINT` | `overpass-api.de` | Primary Overpass mirror |
 | `ARTIFACT_ROOT` | `var/artifacts` | Generated files, kept out of git |
 | `CORS_ALLOW_ORIGINS` | localhost dev origins | Comma separated origins |
+| `AUTH_SESSION_COOKIE_NAME` | `floodsight_session` | Session cookie name |
+| `AUTH_SESSION_TTL_SECONDS` | `604800` (7 days) | Server-side session lifetime |
+| `AUTH_SESSION_COOKIE_SECURE` | `false` | HTTPS-only cookie; forced `true` in production |
+| `AUTH_SESSION_COOKIE_SAMESITE` | `lax` | `lax`, `strict` or `none`; `none` needs a secure cookie |
+| `AUTH_SESSION_COOKIE_DOMAIN` | empty | Optional cookie domain |
+| `AUTH_PASSWORD_MIN_LENGTH` | `8` | Minimum accepted password length |
+| `AUTH_PASSWORD_MAX_LENGTH` | `128` | Maximum accepted password length |
+| `AUTH_LOGIN_MAX_ATTEMPTS` | `5` | Failed sign-ins before a temporary lockout |
+| `AUTH_LOGIN_LOCKOUT_SECONDS` | `900` | Lockout duration |
 
 Never commit `.env`, checkpoints or generated artifacts.
 
@@ -306,6 +323,10 @@ Interactive documentation is served at `/docs`; the OpenAPI schema is at
 
 | Method | Path | Purpose |
 | --- | --- | --- |
+| `POST` | `/api/auth/register` | Create an account. Returns `201` and sets the session cookie. |
+| `POST` | `/api/auth/login` | Sign in. Returns `200`; `remember: false` omits `Max-Age`. |
+| `POST` | `/api/auth/logout` | Revoke the current session. Returns `204`. |
+| `GET` | `/api/auth/me` | The authenticated user. Returns `401` when unauthenticated. |
 | `POST` | `/api/analyses` | Create an analysis and schedule a job. Returns `202`. |
 | `GET` | `/api/analyses` | Paginated list with status filters. |
 | `GET` | `/api/analyses/{id}` | Metadata and result references. |
@@ -346,7 +367,53 @@ queued -> validating -> searching_data -> downloading -> preprocessing
 Any stage may transition to `failed`. `cancelled` is terminal. Transitions
 outside this table are rejected, so a job can never appear to skip work.
 
+## Authentication
+
+Authentication is server-side sessions, not bearer tokens. The browser holds an
+opaque random token in an `HttpOnly` cookie and nothing else; only the SHA-256
+hash of that token is stored, so a database read cannot reconstruct a session.
+Passwords are stored as Argon2id hashes.
+
+### Design
+
+- **Hashing** — `argon2-cffi` with a random per-password salt. Verification uses
+  the library's constant-time comparison and transparently re-hashes when the
+  parameters change.
+- **Sessions** — `auth_sessions` stores `token_hash`, the owning `user_id`,
+  `created_at`, `last_used_at`, `expires_at` and an optional `revoked_at`. A
+  request is authenticated only while `revoked_at IS NULL AND expires_at > now`.
+  Session rows cascade-delete with their user.
+- **Cookie** — `HttpOnly`, `SameSite=Lax`, `Path=/`, `Secure` in production,
+  `Max-Age` equal to `AUTH_SESSION_TTL_SECONDS` unless `remember` is `false`.
+  The default lifetime is 7 days.
+- **CSRF** — `SameSite=Lax` blocks cross-site cookie transmission; in addition,
+  state-changing auth requests reject a declared `Origin` that is not in
+  `CORS_ALLOW_ORIGINS`. Non-browser clients that send no `Origin` are unaffected.
+- **Login throttling** — failures are counted per `sha256(normalised email |
+  client IP)` in `auth_login_attempts`. After `AUTH_LOGIN_MAX_ATTEMPTS` failures
+  the key is locked for `AUTH_LOGIN_LOCKOUT_SECONDS` and further attempts receive
+  `429` with a `retry_after_seconds` hint. A successful sign-in clears the count.
+- **Logout** — revokes the current session row and clears the cookie. An expired,
+  revoked, unknown or malformed token is treated identically: `401`.
+
+### Errors
+
+Unknown email and wrong password both return the same generic
+`401 invalid_credentials` body, and an unknown email still performs a dummy hash
+so the timing does not reveal whether an account exists. Request bodies and
+responses never include the password hash, and passwords/tokens are never logged.
+
+### Scoping and remaining work
+
+Only `/api/auth/*` (notably `/api/auth/me`) is protected at the API layer. The
+analysis endpoints remain unauthenticated and are not yet owned by a user, so the
+frontend gates workspace routes on `/api/auth/me` while the API stays open to the
+existing analysis contract. Email verification, password change/reset, account
+deletion and third-party (Google) sign-in are not implemented; the frontend shows
+these as unavailable rather than simulating them.
+
 ## Processing pipeline
+
 
 1. **validating** — re-validate the stored area of interest and date window.
 2. **searching_data** — query the STAC catalogue for Sentinel-1 GRD RTC scenes
@@ -394,10 +461,15 @@ returned no features reports `0`. Exposure never fails the analysis.
 
 ## Tests
 
+Tests drop and recreate the schema, so they must run against a dedicated,
+throwaway database — never the development database. Point both
+`DATABASE_URL` and `TEST_DATABASE_URL` at the same test database:
+
 ```bash
 cd backend
-DATABASE_URL=postgresql+psycopg://floodsight:floodsight@127.0.0.1:5432/floodsight \
-  python -m pytest tests/
+export DATABASE_URL=postgresql+psycopg://floodsight:floodsight@127.0.0.1:5433/floodsight_test
+export TEST_DATABASE_URL="$DATABASE_URL"
+python -m pytest tests/
 ```
 
 The suite covers health endpoints, the full analysis contract, validation,
@@ -412,6 +484,12 @@ explicit selection rules including the production guard, prediction validation,
 raw mask versus filtered extent, measurement consistency across facts, map,
 summary and report, and OpenStreetMap handling for successful, empty, truncated
 and failed responses.
+
+Authentication coverage includes registration and normalised-email uniqueness,
+password hashing (hashes are never echoed back), invalid input, generic
+invalid-credential responses for unknown email and wrong password, sessions
+accepted/expired/revoked, logout and stale-cookie reuse, login lockout and reset,
+origin checks, and `remember` cookie persistence.
 
 No test requires trained weights or network access.
 
@@ -456,3 +534,11 @@ service against the same queue.
 - OpenStreetMap exposure is supporting context only; no damage is inferred.
 - OpenStreetMap figures can be incomplete where the element limit is reached;
   those categories are reported as unavailable rather than as zero.
+- **Analysis endpoints are not yet user-scoped.** The backend protects
+  `/api/auth/*` only; `POST/GET /api/analyses` remain unauthenticated and results
+  are not associated with a user. The frontend gates workspace routes on
+  `/api/auth/me`, but a direct API caller is not blocked. Adding ownership would
+  change the analysis contract and its tests.
+- **No email verification, password change/reset, account deletion or third-party
+  sign-in.** The frontend presents these actions as unavailable instead of
+  simulating success.
