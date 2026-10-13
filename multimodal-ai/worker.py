@@ -15,17 +15,18 @@ Guarantees:
   - Uses Sentinel-2 only when real bands are explicitly supplied
   - Emits single source of truth facts.json and executive situation report
 
-Note: STAC scene discovery is implemented, but product download and raw GRD
-preprocessing are not. The worker fails clearly when prepared scenes are absent.
+Scene discovery is implemented. The worker accepts caller-supplied, analysis-ready
+Sentinel-1 VV/VH dB GeoTIFFs; it does not download or preprocess raw GRD products.
 """
 
 import argparse
 import hashlib
 import json
 import math
+import os
 import sys
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from urllib.parse import urlencode
@@ -36,9 +37,12 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+import numpy as np
 import rasterio
+from rasterio.crs import CRS
+from rasterio.transform import from_bounds
 from rasterio.warp import transform_bounds
-from rasterio.windows import Window, from_bounds
+from rasterio.windows import Window, from_bounds as window_from_bounds
 
 
 class JobState(str, Enum):
@@ -66,6 +70,7 @@ class JobContext:
         post_image: Path = None,
         s2_green: Path = None,
         s2_nir: Path = None,
+        dem_file: Path = None,
     ):
         self.job_id = job_id
         self.bbox = bbox  # [west, south, east, north]
@@ -75,6 +80,7 @@ class JobContext:
         self.post_image = post_image
         self.s2_green = s2_green
         self.s2_nir = s2_nir
+        self.dem_file = dem_file
         self.state = JobState.QUEUED
         self.error_message = None
         self.history = []
@@ -111,71 +117,185 @@ class JobContext:
 
 
 def acquire_scene_pair(ctx: JobContext, cache_dir: Path) -> tuple[Path, Path]:
-    """Validate caller-supplied, analysis-ready Sentinel-1 scenes."""
-    if not ctx.pre_image or not ctx.post_image:
-        raise RuntimeError(
-            "No real Sentinel-1 pair was supplied. Automatic product download and "
-            "preprocessing are not implemented. Pass --pre-image and --post-image "
-            "as aligned, two-band VV/VH dB GeoTIFFs."
-        )
-    pre_path, post_path = ctx.pre_image, ctx.post_image
-    for path in (pre_path, post_path):
-        if not path.is_file():
-            raise FileNotFoundError(f"Sentinel-1 input not found: {path}")
-    if pre_path.resolve() == post_path.resolve():
-        raise ValueError("Pre-event and post-event images cannot be identical.")
+    """Validate and AOI-crop caller-supplied analysis-ready Sentinel-1 scenes."""
     cache_dir.mkdir(parents=True, exist_ok=True)
-    cropped = []
-    with rasterio.open(pre_path) as pre, rasterio.open(post_path) as post:
-        if pre.count < 2 or post.count < 2:
-            raise ValueError("Both Sentinel-1 inputs must contain VV and VH bands.")
-        if pre.crs is None or post.crs is None:
-            raise ValueError("Both Sentinel-1 inputs must have a defined CRS.")
-        if pre.crs.to_epsg() != 4326:
-            raise ValueError("Inputs must be preprocessed to EPSG:4326 to align with the OSM snapshot.")
-        if pre.crs != post.crs or pre.shape != post.shape or pre.transform != post.transform:
-            raise ValueError("Pre/post rasters must share CRS, dimensions, and pixel alignment.")
-        bounds = transform_bounds(pre.crs, "EPSG:4326", *pre.bounds)
-        west, south, east, north = ctx.bbox
-        if bounds[0] > west or bounds[1] > south or bounds[2] < east or bounds[3] < north:
-            raise ValueError("Sentinel-1 scenes must fully cover the requested bounding box.")
-        raw_window = from_bounds(west, south, east, north, transform=pre.transform)
-        col0 = max(0, math.floor(raw_window.col_off))
-        row0 = max(0, math.floor(raw_window.row_off))
-        col1 = min(pre.width, math.ceil(raw_window.col_off + raw_window.width))
-        row1 = min(pre.height, math.ceil(raw_window.row_off + raw_window.height))
-        if col1 <= col0 or row1 <= row0:
-            raise ValueError("Requested bounding box produced an empty raster crop.")
-        window = Window(col0, row0, col1 - col0, row1 - row0)
+    if ctx.pre_image and ctx.post_image:
+        pre_path, post_path = ctx.pre_image, ctx.post_image
+        for path in (pre_path, post_path):
+            if not path.is_file():
+                raise FileNotFoundError(f"Sentinel-1 input not found: {path}")
+        if pre_path.resolve() == post_path.resolve():
+            raise ValueError("Pre-event and post-event images cannot be identical.")
+        cropped = []
+        with rasterio.open(pre_path) as pre, rasterio.open(post_path) as post:
+            if pre.count < 2 or post.count < 2:
+                raise ValueError("Both Sentinel-1 inputs must contain VV and VH bands.")
+            if pre.crs is None or post.crs is None:
+                raise ValueError("Both Sentinel-1 inputs must have a defined CRS.")
+            if pre.crs.to_epsg() != 4326:
+                raise ValueError("Inputs must be preprocessed to EPSG:4326 to align with the OSM snapshot.")
+            if pre.crs != post.crs or pre.shape != post.shape or pre.transform != post.transform:
+                raise ValueError("Pre/post rasters must share CRS, dimensions, and pixel alignment.")
+            bounds = transform_bounds(pre.crs, "EPSG:4326", *pre.bounds)
+            west, south, east, north = ctx.bbox
+            if bounds[0] > west or bounds[1] > south or bounds[2] < east or bounds[3] < north:
+                raise ValueError("Sentinel-1 scenes must fully cover the requested bounding box.")
+            raw_window = window_from_bounds(west, south, east, north, transform=pre.transform)
+            col0 = max(0, math.floor(raw_window.col_off))
+            row0 = max(0, math.floor(raw_window.row_off))
+            col1 = min(pre.width, math.ceil(raw_window.col_off + raw_window.width))
+            row1 = min(pre.height, math.ceil(raw_window.row_off + raw_window.height))
+            if col1 <= col0 or row1 <= row0:
+                raise ValueError("Requested bounding box produced an empty raster crop.")
+            window = Window(col0, row0, col1 - col0, row1 - row0)
 
-        for source, label in ((pre, "pre"), (post, "post")):
-            out_path = cache_dir / f"{ctx.job_id}_{label}_aoi.tif"
-            profile = source.profile.copy()
-            profile.update(
-                driver="GTiff",
-                height=int(window.height),
-                width=int(window.width),
-                count=2,
-                transform=source.window_transform(window),
-                compress="lzw",
-            )
-            with rasterio.open(out_path, "w", **profile) as dst:
-                dst.write(source.read((1, 2), window=window))
-                dst.write_mask(source.dataset_mask(window=window))
-                dst.update_tags(**source.tags(), requested_bbox=",".join(map(str, ctx.bbox)))
-            cropped.append(out_path)
-    return cropped[0], cropped[1]
+            for source, label in ((pre, "pre"), (post, "post")):
+                out_path = cache_dir / f"{ctx.job_id}_{label}_aoi.tif"
+                profile = source.profile.copy()
+                profile.update(
+                    driver="GTiff",
+                    height=int(window.height),
+                    width=int(window.width),
+                    count=2,
+                    transform=source.window_transform(window),
+                    compress="lzw",
+                )
+                with rasterio.open(out_path, "w", **profile) as dst:
+                    dst.write(source.read((1, 2), window=window))
+                    dst.write_mask(source.dataset_mask(window=window))
+                    dst.update_tags(**source.tags(), requested_bbox=",".join(map(str, ctx.bbox)))
+                cropped.append(out_path)
+        return cropped[0], cropped[1]
+
+    # Re-use cached scene pair for this job_id if present
+    pre_path = cache_dir / f"{ctx.job_id}_pre.tif"
+    post_path = cache_dir / f"{ctx.job_id}_post.tif"
+    if pre_path.exists() and post_path.exists():
+        return pre_path, post_path
+    raise FileNotFoundError(
+        f"Real Sentinel-1 imagery not provided for target bounding box {ctx.bbox} and flood date {ctx.flood_date}. "
+        "Supply real Sentinel-1 dual-pol (VV/VH dB) GeoTIFFs via --post-image (and optional --pre-image). "
+        "Synthetic demo data generation has been disabled per challenge rules."
+    )
 
 
 def acquire_optical_pair(ctx: JobContext, cache_dir: Path) -> tuple[Path, Path] | None:
-    """Return caller-supplied Sentinel-2 bands, or None when unavailable."""
-    if not ctx.s2_green and not ctx.s2_nir:
-        return None
-    if not ctx.s2_green or not ctx.s2_nir:
+    """Acquire caller-supplied clear-sky Sentinel-2 L2A Green (B03) and NIR (B08) scenes."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    if ctx.s2_green and ctx.s2_nir:
+        if not ctx.s2_green.is_file() or not ctx.s2_nir.is_file():
+            raise FileNotFoundError("A supplied Sentinel-2 band file does not exist.")
+        return ctx.s2_green, ctx.s2_nir
+    if (ctx.s2_green and not ctx.s2_nir) or (ctx.s2_nir and not ctx.s2_green):
         raise ValueError("Provide both --s2-green and --s2-nir, or neither.")
-    if not ctx.s2_green.is_file() or not ctx.s2_nir.is_file():
-        raise FileNotFoundError("A supplied Sentinel-2 band file does not exist.")
-    return ctx.s2_green, ctx.s2_nir
+
+    green_path = cache_dir / f"{ctx.job_id}_s2_b03_green.tif"
+    nir_path = cache_dir / f"{ctx.job_id}_s2_b08_nir.tif"
+    if green_path.exists() and nir_path.exists():
+        return green_path, nir_path
+
+    return None
+
+
+def validate_prepared_sar_pair(pre_path: Path, post_path: Path, flood_date: str) -> dict:
+    """Check dB value ranges and compare orbit/date tags when the files carry them."""
+    metadata = []
+    for label, path in (("pre", pre_path), ("post", post_path)):
+        with rasterio.open(path) as src:
+            if src.count < 2:
+                raise ValueError(f"{label}-event Sentinel-1 raster must contain VV and VH bands.")
+            sample_h, sample_w = min(256, src.height), min(256, src.width)
+            sample = src.read(
+                (1, 2), out_shape=(2, sample_h, sample_w), masked=True, out_dtype="float32"
+            )
+            for band_index, band_name in enumerate(("VV", "VH")):
+                values = sample[band_index].compressed()
+                values = values[np.isfinite(values)]
+                if values.size == 0:
+                    raise ValueError(f"{label}-event {band_name} band contains no valid pixels.")
+                plausible = (values >= -60.0) & (values <= 20.0)
+                if float(plausible.mean()) < 0.95:
+                    raise ValueError(
+                        f"{label}-event {band_name} values do not look like decibels; "
+                        "provide calibrated VV/VH dB GeoTIFFs."
+                    )
+            tags = {str(key).lower(): str(value) for key, value in src.tags().items()}
+            metadata.append({
+                "role": label,
+                "filename": path.name,
+                "relative_orbit": next((tags[key] for key in (
+                    "sat:relative_orbit", "s1:relative_orbit_number", "relative_orbit", "relative_orbit_number"
+                ) if key in tags), None),
+                "orbit_direction": next((tags[key] for key in (
+                    "sat:orbit_state", "s1:orbit_direction", "orbit_direction", "direction"
+                ) if key in tags), None),
+                "acquisition_datetime": next((tags[key] for key in (
+                    "datetime", "acquisition_datetime", "start_datetime", "date_acquired"
+                ) if key in tags), None),
+            })
+
+    pre, post = metadata
+    orbit_verified = bool(pre["relative_orbit"] and post["relative_orbit"] and pre["orbit_direction"] and post["orbit_direction"])
+    if orbit_verified and (
+        pre["relative_orbit"] != post["relative_orbit"]
+        or pre["orbit_direction"].lower() != post["orbit_direction"].lower()
+    ):
+        raise ValueError("Pre/post rasters declare different Sentinel-1 relative orbits or flight directions.")
+
+    dates_verified = False
+    if pre["acquisition_datetime"] and post["acquisition_datetime"]:
+        def parse_tag(value):
+            normalized = value.replace("Z", "+00:00")
+            parsed = datetime.fromisoformat(normalized)
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+        pre_dt, post_dt = parse_tag(pre["acquisition_datetime"]), parse_tag(post["acquisition_datetime"])
+        event_dt = datetime.fromisoformat(flood_date).replace(tzinfo=timezone.utc)
+        if pre_dt >= event_dt or post_dt < event_dt or pre_dt >= post_dt:
+            raise ValueError("Raster acquisition tags do not form a valid pre-event/post-event pair for flood_date.")
+        dates_verified = True
+
+    return {
+        "rasters": metadata,
+        "same_orbit_verified_from_tags": orbit_verified,
+        "event_order_verified_from_tags": dates_verified,
+        "operator_must_verify_pair_when_tags_missing": not (orbit_verified and dates_verified),
+    }
+
+
+def validate_pair_against_discovery(pair_validation: dict, stac_results: dict) -> dict:
+    """Cross-check tagged input orbit metadata against the selected STAC pair."""
+    best_pair = (stac_results or {}).get("best_pair")
+    if not best_pair:
+        return {"stac_orbit_consistency": "not_checkable_no_discovered_pair"}
+    if not pair_validation.get("same_orbit_verified_from_tags"):
+        return {"stac_orbit_consistency": "not_checkable_input_orbit_tags_missing"}
+
+    def normalized_orbit(value) -> str:
+        raw = str(value or "").strip()
+        return str(int(raw)) if raw.isdigit() else raw.casefold()
+
+    def normalized_direction(value) -> str:
+        raw = str(value or "").strip().casefold()
+        return {"a": "ascending", "asc": "ascending", "d": "descending", "desc": "descending"}.get(raw, raw)
+
+    selected_orbit = normalized_orbit(best_pair.get("relative_orbit"))
+    selected_direction = normalized_direction(best_pair.get("direction"))
+    rasters = pair_validation.get("rasters", [])
+    matches = all(
+        normalized_orbit(raster.get("relative_orbit")) == selected_orbit
+        and normalized_direction(raster.get("orbit_direction")) == selected_direction
+        for raster in rasters
+    )
+    if not matches:
+        raise ValueError(
+            "The supplied rasters' orbit tags do not match the best same-orbit pair "
+            "discovered for this AOI/date. Verify the source products or choose the matching pair."
+        )
+    return {
+        "stac_orbit_consistency": "input_tags_match_selected_relative_orbit_and_direction",
+        "input_files_linked_to_discovered_pair": False,
+    }
 
 
 def _fetch_ohsome_features(bbox: list[float], snapshot_date: str, filter_expr: str, cache_dir: Path) -> dict:
@@ -203,18 +323,24 @@ def _fetch_ohsome_features(bbox: list[float], snapshot_date: str, filter_expr: s
         },
         method="POST",
     )
-    with urlopen(request, timeout=120) as response:
-        data = json.loads(response.read().decode("utf-8"))
-    if not isinstance(data, dict) or not isinstance(data.get("features"), list):
-        raise RuntimeError(f"ohsome returned invalid GeoJSON for filter: {filter_expr}")
-    for feature in data["features"]:
-        properties = feature.setdefault("properties", {})
-        tags = properties.pop("tags", {})
-        if isinstance(tags, dict):
-            properties.update(tags)
-    with cache_path.open("w", encoding="utf-8") as stream:
-        json.dump(data, stream)
-    return data
+    try:
+        with urlopen(request, timeout=30) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        if not isinstance(data, dict) or not isinstance(data.get("features"), list):
+            raise RuntimeError(f"ohsome returned invalid GeoJSON for filter: {filter_expr}")
+        for feature in data["features"]:
+            properties = feature.setdefault("properties", {})
+            tags = properties.pop("tags", {})
+            if isinstance(tags, dict):
+                properties.update(tags)
+        with cache_path.open("w", encoding="utf-8") as stream:
+            json.dump(data, stream)
+        return data
+    except Exception as err:
+        raise RuntimeError(
+            f"Could not retrieve the dated pre-event OSM snapshot for '{filter_expr}': {err}. "
+            "The job was stopped so missing infrastructure data is not reported as zero exposure."
+        ) from err
 
 
 def acquire_osm_snapshot(ctx: JobContext, cache_dir: Path) -> dict[str, dict]:
@@ -227,6 +353,7 @@ def acquire_osm_snapshot(ctx: JobContext, cache_dir: Path) -> dict[str, dict]:
         "roads": _fetch_ohsome_features(bbox, snapshot_date, "highway=* and type:way", cache_dir),
         "bridges": _fetch_ohsome_features(bbox, snapshot_date, "bridge=* and type:way", cache_dir),
         "settlements": _fetch_ohsome_features(bbox, snapshot_date, "place=* and type:node", cache_dir),
+        "towns": _fetch_ohsome_features(bbox, snapshot_date, "(place=town or place=city) and type:node", cache_dir),
         "hospitals": _fetch_ohsome_features(bbox, snapshot_date, "amenity=hospital or amenity=clinic", cache_dir),
     }
     data["snapshot_date"] = snapshot_date
@@ -242,13 +369,11 @@ def run_pipeline_worker(ctx: JobContext) -> bool:
         west, south, east, north = ctx.bbox
         if not (-180.0 <= west < east <= 180.0 and -90.0 <= south < north <= 90.0):
             raise ValueError(f"Invalid bounding box coordinates: {ctx.bbox}")
-        if not ctx.pre_image or not ctx.post_image:
-            raise ValueError(
-                "This worker needs caller-prepared Sentinel-1 pre/post scenes. "
-                "Raw product download and GRD calibration are not implemented."
-            )
-        if not ctx.pre_image.is_file() or not ctx.post_image.is_file():
-            raise FileNotFoundError("One or both supplied Sentinel-1 scenes do not exist.")
+        if ctx.pre_image or ctx.post_image:
+            if not ctx.pre_image or not ctx.post_image:
+                raise ValueError("Both --pre-image and --post-image must be provided together.")
+            if not ctx.pre_image.is_file() or not ctx.post_image.is_file():
+                raise FileNotFoundError("One or both supplied Sentinel-1 scenes do not exist.")
         try:
             datetime.strptime(ctx.flood_date, "%Y-%m-%d")
         except ValueError:
@@ -266,29 +391,47 @@ def run_pipeline_worker(ctx: JobContext) -> bool:
         # ─────────────────────────────────────────────────────────────────────
         # 3. DOWNLOADING
         # ─────────────────────────────────────────────────────────────────────
-        ctx.set_state(JobState.DOWNLOADING, "Validating supplied Sentinel-1 scenes; automated download is not available.")
+        ctx.set_state(JobState.DOWNLOADING, "Using caller-supplied analysis-ready scenes; raw satellite product download is not implemented.")
         cache_dir = ctx.out_dir / "scene_cache"
         pre_scene, post_scene = acquire_scene_pair(ctx, cache_dir)
         print(f"  [Worker] Pre-flood scene:  {pre_scene.name}")
         print(f"  [Worker] Post-flood scene: {post_scene.name}")
+        pair_validation = validate_prepared_sar_pair(pre_scene, post_scene, ctx.flood_date)
+        pair_validation.update(validate_pair_against_discovery(pair_validation, stac_results))
 
         # ─────────────────────────────────────────────────────────────────────
         # 4. PREPROCESSING
         # ─────────────────────────────────────────────────────────────────────
-        ctx.set_state(JobState.PREPROCESSING, f"Using supplied analysis-ready VV/VH dB raster {post_scene.name}.")
+        pair_tag_status = (
+            "orbit and event-order tags verified"
+            if pair_validation["same_orbit_verified_from_tags"] and pair_validation["event_order_verified_from_tags"]
+            else "orbit/date tags incomplete; operator must verify the supplied pair"
+        )
+        ctx.set_state(
+            JobState.PREPROCESSING,
+            f"Checked VV/VH dB values, CRS, alignment, AOI coverage; {pair_tag_status}.",
+        )
 
         # ─────────────────────────────────────────────────────────────────────
         # 5. FLOOD_MAPPING
         # ─────────────────────────────────────────────────────────────────────
-        ctx.set_state(JobState.FLOOD_MAPPING, "Running log-ratio baseline and U-Net model with best.pt weights.")
-        from predict import load_checkpoint, predict_one
+        ctx.set_state(JobState.FLOOD_MAPPING, "Running U-Net flood inference with available temporal/spatial screening heuristics.")
+        from predict import (
+            default_checkpoint_path,
+            default_confidence_threshold,
+            load_checkpoint,
+            predict_one,
+        )
         import torch
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        ckpt_path = Path("checkpoints/best.pt")
+        default_checkpoint = default_checkpoint_path()
+        ckpt_path = Path(os.environ.get("FLOODSIGHT_CHECKPOINT", str(default_checkpoint)))
         if not ckpt_path.exists():
-            ckpt_path = Path("checkpoints/latest.pt")
-        if not ckpt_path.exists():
-            raise FileNotFoundError("No trained checkpoint found in checkpoints/ (run train.py first).")
+            raise FileNotFoundError(f"Configured model checkpoint not found: {ckpt_path}. Train or configure FLOODSIGHT_CHECKPOINT.")
+
+        confidence_threshold = default_confidence_threshold(ckpt_path)
+        if not 0.0 <= confidence_threshold <= 1.0:
+            raise ValueError("FLOODSIGHT_THRESHOLD must be between 0 and 1.")
 
         model, mean, std, p_size, ckpt = load_checkpoint(ckpt_path, device)
         facts = predict_one(
@@ -303,6 +446,7 @@ def run_pipeline_worker(ctx: JobContext) -> bool:
             ckpt_path=ckpt_path,
             ckpt=ckpt,
             temperature=1.0,
+            confidence_threshold=confidence_threshold,
             pre_scene_path=pre_scene,
         )
 
@@ -313,12 +457,16 @@ def run_pipeline_worker(ctx: JobContext) -> bool:
         multi_mask_path = ctx.out_dir / f"{post_scene.stem}_multiclass_mask.tif"
         debris_res = run_debris_module(pre_scene, post_scene, flood_mask_path, multi_mask_path)
         facts["debris_detection"] = debris_res
+        facts["debris_detection_status"] = "experimental_surface_change_candidates"
 
         # Pull debris fields to top level of facts for direct situation report rendering
-        pixel_area_m2 = facts.get("pixel_area_m2", 100.0)
+        pixel_area_m2 = facts.get("pixel_area_m2")
         debris_px = debris_res.get("debris_pixel_count", 0)
-        facts["debris_area_km2"] = round(float(debris_px * pixel_area_m2 / 1e6), 6)
-        facts["debris_confidence"] = debris_res.get("debris_confidence", 0.65)
+        facts["debris_area_km2"] = (
+            round(float(debris_px * pixel_area_m2 / 1e6), 6)
+            if pixel_area_m2 is not None else None
+        )
+        facts["debris_heuristic_score"] = debris_res.get("debris_heuristic_score")
 
         # Cross-Sensor Optical Verification (Sentinel-2 clear-sky NDWI)
         optical_pair = acquire_optical_pair(ctx, cache_dir)
@@ -329,7 +477,10 @@ def run_pipeline_worker(ctx: JobContext) -> bool:
                 green_path, nir_path, flood_mask_path, ctx.out_dir / "optical"
             )
         else:
-            facts["cross_sensor_optical"] = {"status": "not_available", "note": "No real Sentinel-2 bands were supplied."}
+            facts["cross_sensor_optical"] = {
+                "status": "not_available",
+                "note": "No real Sentinel-2 bands were supplied; no optical confirmation was used.",
+            }
 
         # ─────────────────────────────────────────────────────────────────────
         # 6. DAMAGE_ANALYSIS
@@ -346,6 +497,7 @@ def run_pipeline_worker(ctx: JobContext) -> bool:
             osm_data["bridges"],
         )
         facts.update(damage)
+        osm_data["potentially_affected_assets"] = damage["potentially_affected_assets"]
         facts["osm_snapshot_date"] = osm_data["snapshot_date"]
         facts["osm_source"] = "ohsome API"
 
@@ -354,10 +506,50 @@ def run_pipeline_worker(ctx: JobContext) -> bool:
         from connectivity_analysis import analyze_connectivity, build_road_graph
         graph, _ = build_road_graph(osm_data["roads"])
         conn_results = analyze_connectivity(
-            flood_poly, graph, osm_data["settlements"]["features"], osm_data["hospitals"]["features"]
+            flood_poly,
+            graph,
+            osm_data["settlements"]["features"],
+            osm_data["hospitals"]["features"],
+            towns=osm_data["towns"]["features"],
         )
         facts["settlement_counts"] = conn_results["settlement_counts"]
         facts["settlements"] = conn_results["settlements"]
+        facts["connectivity_method"] = conn_results["method"]
+        facts["connectivity_interpretation"] = conn_results["interpretation"]
+        facts["road_disruption_assumption"] = conn_results["disruption_assumption"]
+        facts["road_disruption_buffer_m"] = conn_results["disruption_buffer_m"]
+
+        # Downstream flood-path analysis using Copernicus DEM (Bonus requirement)
+        from dem_flow_analysis import run_dem_flow_analysis, analyze_downstream_exposure
+        dem_flow_res = run_dem_flow_analysis(flood_mask_path, dem_path=ctx.dem_file, out_dir=ctx.out_dir)
+        downstream_exposed = analyze_downstream_exposure(
+            dem_flow_res.get("flow_path_coords", []),
+            osm_data["settlements"].get("features", [])
+        )
+        dem_flow_res["downstream_communities_near_screening_path"] = downstream_exposed
+        facts["dem_flow_analysis"] = dem_flow_res
+        facts["input_provenance"] = {
+            "sentinel1": {
+                "pre_raster": pre_scene.name,
+                "post_raster": post_scene.name,
+                "source": "caller-supplied analysis-ready rasters; file identity and provider product records are not verified against STAC",
+            },
+            "sentinel1_pairing": {
+                "stac_search_status": stac_results.get("status", "SEARCH_ERROR_OR_UNAVAILABLE"),
+                "best_discovered_pair": stac_results.get("best_pair"),
+                "input_files_linked_to_discovered_pair": False,
+                **pair_validation,
+            },
+            "osm": {"provider": "ohsome API", "snapshot_date": osm_data["snapshot_date"]},
+        }
+        attributions = [
+            "Sentinel-1 prepared rasters were caller-supplied; provider, acquisition, and licence metadata were not independently verified.",
+            f"© OpenStreetMap contributors; historical snapshot {osm_data['snapshot_date']}, retrieved via ohsome (ODbL).",
+            "Training dataset: KuroSiwo (Bountos et al., 2024).",
+        ]
+        if dem_flow_res.get("status") not in ("SKIPPED", "NO_FLOOD_PIXELS"):
+            attributions.append("A caller-supplied or locally configured DEM was used; product provenance and licence were not independently verified.")
+        facts["data_attributions"] = attributions
 
         # Write unified facts.json
         with open(ctx.facts_file, "w", encoding="utf-8") as f:
@@ -376,6 +568,7 @@ def run_pipeline_worker(ctx: JobContext) -> bool:
             flood_mask_path,
             ctx.out_dir / "dashboard.html",
             osm_data=osm_data,
+            multiclass_mask_path=multi_mask_path,
         )
 
         # ─────────────────────────────────────────────────────────────────────
@@ -400,6 +593,7 @@ def main():
     p.add_argument("--post-image", type=Path, default=None, help="Custom Sentinel-1 post-flood GeoTIFF")
     p.add_argument("--s2-green", type=Path, default=None, help="Custom Sentinel-2 Band 3 (Green) GeoTIFF")
     p.add_argument("--s2-nir", type=Path, default=None, help="Custom Sentinel-2 Band 8 (NIR) GeoTIFF")
+    p.add_argument("--dem", type=Path, default=None, help="Custom Copernicus WorldDEM-30 GeoTIFF")
     args = p.parse_args()
 
     print("=" * 65)
@@ -415,6 +609,7 @@ def main():
         post_image=args.post_image,
         s2_green=args.s2_green,
         s2_nir=args.s2_nir,
+        dem_file=args.dem,
     )
     success = run_pipeline_worker(ctx)
     sys.exit(0 if success else 1)

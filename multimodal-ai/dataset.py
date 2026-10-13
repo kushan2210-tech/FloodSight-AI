@@ -10,8 +10,8 @@ from albumentations.pytorch import ToTensorV2
 # Normalization defaults; train.py replaces these with statistics estimated
 # from its training split before constructing either dataset.
 # ---------------------------------------------------------------------------
-SAR_MEAN = np.array([-12.5, -18.0], dtype=np.float32)   # [VV_mean, VH_mean] in dB
-SAR_STD  = np.array([4.5,   4.0],   dtype=np.float32)   # [VV_std,  VH_std]  in dB
+SAR_MEAN = np.array([-12.5, -18.0], dtype=np.float32)   # default [VV, VH] in dB
+SAR_STD  = np.array([4.5,   4.0],   dtype=np.float32)
 
 
 def set_sar_stats(mean: np.ndarray, std: np.ndarray) -> None:
@@ -19,8 +19,8 @@ def set_sar_stats(mean: np.ndarray, std: np.ndarray) -> None:
     global SAR_MEAN, SAR_STD
     mean = np.asarray(mean, dtype=np.float32)
     std = np.asarray(std, dtype=np.float32)
-    if mean.shape != (2,) or std.shape != (2,) or np.any(std <= 0):
-        raise ValueError("SAR mean/std must each contain two values and std must be positive")
+    if mean.ndim != 1 or mean.shape != std.shape or mean.size not in (2, 4) or np.any(std <= 0):
+        raise ValueError("SAR mean/std must each have matching 2- or 4-band values and std must be positive")
     SAR_MEAN, SAR_STD = mean, std
 
 
@@ -31,10 +31,16 @@ def estimate_sar_stats(image_paths: list[str]) -> tuple[np.ndarray, np.ndarray]:
     counts = np.zeros(2, dtype=np.int64)
     for path in image_paths:
         with rasterio.open(path) as src:
-            if src.count != 2:
-                raise ValueError(f"Expected two VV/VH bands in {path}; found {src.count}")
-            bands = src.read((1, 2), masked=True, out_dtype="float32")
-        for channel in range(2):
+            if src.count not in (2, 4):
+                raise ValueError(f"Expected a 2-band or 4-band SAR image in {path}; found {src.count}")
+            bands = src.read(masked=True, out_dtype="float32")
+        if sums.size != bands.shape[0]:
+            if np.any(counts):
+                raise ValueError("Cannot estimate SAR statistics from images with mixed band counts")
+            sums = np.zeros(bands.shape[0], dtype=np.float64)
+            sums_sq = np.zeros(bands.shape[0], dtype=np.float64)
+            counts = np.zeros(bands.shape[0], dtype=np.int64)
+        for channel in range(bands.shape[0]):
             values = np.asarray(bands[channel].compressed(), dtype=np.float64)
             values = values[np.isfinite(values)]
             if values.size:
@@ -99,16 +105,24 @@ def get_val_transforms(patch_size: int = 256) -> A.Compose:
     ])
 
 
-def normalise_sar(image: np.ndarray) -> np.ndarray:
+def normalise_sar(
+    image: np.ndarray,
+    mean: np.ndarray | None = None,
+    std: np.ndarray | None = None,
+) -> np.ndarray:
     """
     Z-score normalise a (H, W, 2) SAR image using pre-computed global stats.
     Clips extreme dB values first to reduce the effect of outliers.
     """
-    # Clip to ±3σ before normalising
-    low  = SAR_MEAN - 3 * SAR_STD
-    high = SAR_MEAN + 3 * SAR_STD
+    mean = SAR_MEAN if mean is None else np.asarray(mean, dtype=np.float32)
+    std = SAR_STD if std is None else np.asarray(std, dtype=np.float32)
+    if mean.ndim != 1 or mean.shape != std.shape or mean.size not in (2, 4) or np.any(std <= 0):
+        raise ValueError("SAR mean/std must each have matching 2- or 4-band values and std must be positive")
+    # Clip to ±3σ before normalising.
+    low = mean - 3 * std
+    high = mean + 3 * std
     image = np.clip(image, low, high)
-    return (image - SAR_MEAN) / (SAR_STD + 1e-6)
+    return (image - mean) / (std + 1e-6)
 
 
 class KuroSiwoDataset(Dataset):
@@ -143,6 +157,8 @@ class KuroSiwoDataset(Dataset):
         use_rasterio: bool = True,
         samples_per_image: int = 1,
         grid_crops: bool = False,
+        sar_mean: np.ndarray | None = None,
+        sar_std: np.ndarray | None = None,
     ):
         if not image_paths:
             raise ValueError("image_paths must not be empty")
@@ -156,6 +172,11 @@ class KuroSiwoDataset(Dataset):
         self.patch_size   = patch_size
         self.transforms   = transforms
         self.use_rasterio = use_rasterio
+        self.sar_mean = np.asarray(SAR_MEAN if sar_mean is None else sar_mean, dtype=np.float32)
+        self.sar_std = np.asarray(SAR_STD if sar_std is None else sar_std, dtype=np.float32)
+        if (self.sar_mean.ndim != 1 or self.sar_mean.shape != self.sar_std.shape
+                or self.sar_mean.size not in (2, 4) or np.any(self.sar_std <= 0)):
+            raise ValueError("SAR mean/std must have matching 2- or 4-band values and positive std")
         if samples_per_image < 1:
             raise ValueError("samples_per_image must be positive")
         self.samples_per_image = samples_per_image
@@ -181,11 +202,15 @@ class KuroSiwoDataset(Dataset):
 
     def _load_image(self, path: str) -> np.ndarray:
         """
-        Load a 2-band SAR GeoTIFF and return a (H, W, 2) float32 array in dB.
+        Load a SAR GeoTIFF and return a (H, W, C) float32 array in dB.
         Nodata pixels are filled with SAR_MEAN (neutral fill before normalisation).
         """
         with rasterio.open(path) as src:
             # shape: (bands, H, W)
+            if src.count != len(self.sar_mean):
+                raise ValueError(
+                    f"Expected {len(self.sar_mean)} SAR bands in {path}; found {src.count}"
+                )
             data = src.read(
                 out_dtype="float32",
                 masked=True,          # Returns a masked array honouring nodata
@@ -194,16 +219,16 @@ class KuroSiwoDataset(Dataset):
 
         # Fill masked / nodata areas with band mean so augmentation doesn't blow up
         if hasattr(data, "filled"):
-            fill_vals = SAR_MEAN[:, None, None]   # broadcast to (C, 1, 1)
+            fill_vals = self.sar_mean[:, None, None]   # broadcast to (C, 1, 1)
             data = data.filled(fill_vals)
         else:
             data = np.array(data, dtype=np.float32)
             if nodata is not None:
                 for c in range(data.shape[0]):
-                    data[c][data[c] == nodata] = SAR_MEAN[c]
+                    data[c][data[c] == nodata] = self.sar_mean[c]
 
         # Transpose to (H, W, C) for Albumentations
-        return np.transpose(data, (1, 2, 0))    # → (H, W, 2)
+        return np.transpose(data, (1, 2, 0))
 
     def _load_mask(self, path: str) -> np.ndarray:
         """
@@ -245,7 +270,7 @@ class KuroSiwoDataset(Dataset):
                 f"Image and mask dimensions differ for {self.image_paths[image_index]}: "
                 f"{image.shape[:2]} vs {mask.shape}"
             )
-        image = normalise_sar(image)                                  # (H, W, 2)
+        image = normalise_sar(image, self.sar_mean, self.sar_std)      # (H, W, 2)
 
         # Keep tiny scenes usable by crop-based transforms without inventing
         # valid labels: padded mask pixels are ignored by the loss.
