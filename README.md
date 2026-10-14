@@ -1,163 +1,213 @@
+# FloodSight AI
 
-# FloodSight AI — Mapping Flood Damage from Space
+FloodSight AI is a web application for exploring potential flood extent from satellite radar imagery. It lets an analyst define an area and event date, queue an analysis, inspect the returned map and measurements, and download a situation report.
 
-React frontend for a satellite-powered flood damage analysis workflow, backed by
-a FastAPI service that runs a custom-trained flood segmentation model over
-Sentinel-1 radar imagery.
+> **Interpret results carefully.** A trained model produces predictions, not confirmed ground truth. The development-only `synthetic_test` provider produces labelled test patterns, not flood predictions. OpenStreetMap intersections indicate possible exposure; they do not confirm damage.
 
-## Stack
+## Contents
 
-### Frontend
+- [Features](#features)
+- [How it works](#how-it-works)
+- [Technology](#technology)
+- [Requirements](#requirements)
+- [Run locally](#run-locally)
+- [Use a trained model](#use-a-trained-model)
+- [Build and preview the frontend](#build-and-preview-the-frontend)
+- [Data and persistence](#data-and-persistence)
+- [API and health checks](#api-and-health-checks)
+- [Troubleshooting](#troubleshooting)
+- [Tests](#tests)
+- [More documentation](#more-documentation)
 
-- React
-- React Router
-- MapLibre GL JS
-- JavaScript / JSX
-- Plain CSS
-- Node.js build/server script with esbuild for bundling
+## Features
 
-### Backend
+- Search for a location or draw an area of interest on the map.
+- Submit an analysis for an event date and follow its processing status.
+- Review flood extent maps, measurements, provenance, warnings, and available exposure context.
+- Open a generated PDF situation report and download supported geospatial artifacts.
+- Register and sign in with a server-managed session.
+- Choose a light or dark workspace theme and save profile display details on the current browser.
 
-- FastAPI, Pydantic v2, SQLAlchemy 2.x, Alembic
-- PostgreSQL for analysis records, accounts and the job queue
-- Rasterio, Shapely, GeoPandas, NumPy, SciPy for geospatial processing
-- PyTorch for the custom flood segmentation model
-- Argon2id password hashing and server-side sessions in an HttpOnly cookie
-- A dedicated worker process consuming PostgreSQL-backed jobs
+## How it works
 
-## Repository layout
-
+```mermaid
+flowchart LR
+    A[React web app] -->|same-origin API requests| B[FastAPI]
+    B --> C[(PostgreSQL)]
+    C -->|queued analysis| D[Analysis worker]
+    D --> E[STAC satellite imagery]
+    D --> F[Trained model or explicit test provider]
+    D --> G[OpenStreetMap context]
+    D --> H[PDF and geospatial artifacts]
+    B --> A
 ```
-src/                  React frontend
-build.mjs             esbuild bundler and dev/preview server
-tests/frontend/       Node test-runner checks for the API client, auth flow and bundle
-backend/              FastAPI service, worker and tests
-docker-compose.yml    postgres, api and worker services
-multimodal-ai/        model repository checkout (git-ignored)
-```
+
+The API records an analysis and queues a job in PostgreSQL. A separate worker acquires and prepares imagery, runs the configured prediction provider, stores results and artifacts, and marks the job complete or failed. The browser reads its status and displays data returned by the backend; it does not invent flood measurements or map layers.
+
+## Technology
+
+| Area | Main components |
+| --- | --- |
+| Web app | React, React Router, MapLibre GL JS, plain CSS |
+| Build and local server | Node.js, esbuild, `build.mjs` |
+| API | FastAPI, Pydantic, SQLAlchemy, Alembic |
+| Data and jobs | PostgreSQL |
+| Geospatial processing | Rasterio, Shapely, GeoPandas, NumPy, SciPy |
+| Prediction | PyTorch and the FloodSight model repository |
 
 ## Requirements
 
-- Node.js 20 or newer, and npm
+- Node.js 20 or later and npm
 - Python 3.12
-- PostgreSQL 14 or newer
-- Trained model weights (`best.pt`) — see `backend/README.md`
+- Docker Desktop or Docker Engine with Compose, for local PostgreSQL
+- Internet access for satellite catalogue, location search, and map tiles
+- Trained model repository and checkpoint for real model predictions (optional for local UI and synthetic pipeline development)
 
 ## Run locally
 
-Backend first:
+These steps run PostgreSQL in Docker and the API, worker, and frontend as local processes. They are written for PowerShell; equivalent activation and copy commands for macOS/Linux are included below.
 
-```bash
+### 1. Start the database and install backend dependencies
+
+From the repository root:
+
+```powershell
 docker compose up -d postgres
-
-python -m venv .venv
-source .venv/bin/activate
-pip install -r backend/requirements.txt
-
-cp backend/.env.example backend/.env     # set MODEL_PATH and MODEL_REPO_PATH
-cd backend && alembic upgrade head && cd ..   # creates analysis + auth tables
-
-uvicorn app.main:app --app-dir backend --reload     # http://localhost:8000
-python -m app.workers.analysis_worker               # in a second terminal
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r backend/requirements.txt
+Copy-Item backend/.env.example backend/.env
 ```
 
-Frontend:
+Edit `backend/.env` and set `PREDICTION_PROVIDER=synthetic_test` if you do not have a trained checkpoint. This mode is only for development and pipeline testing; its output is explicitly labelled synthetic and is not a flood prediction. The default is `trained_model`.
 
-```bash
-npm install
+### 2. Apply migrations and start the API
+
+In a terminal at the repository root:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+Set-Location backend
+alembic upgrade head
+uvicorn app.main:app --reload
+```
+
+The API is available at `http://127.0.0.1:8000`; interactive API docs are at `http://127.0.0.1:8000/docs`.
+
+### 3. Start the worker
+
+In a second terminal at the repository root:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+Set-Location backend
+python -m app.workers.analysis_worker
+```
+
+The worker is required to process queued analyses. Without it, new jobs remain queued.
+
+### 4. Start the frontend
+
+In a third terminal at the repository root:
+
+```powershell
+npm ci
 npm run dev
 ```
 
-Open `http://localhost:3000`. The dev server proxies `/api` and `/health` to
-`http://127.0.0.1:8000`, forwarding cookies so backend sessions work. Register
-an account from the sign-up screen, or on a fresh database with the API running:
+Open `http://localhost:3000`. The development server proxies `/api` and `/health` to `http://127.0.0.1:8000`, including the session cookie. Create an account from the sign-up page.
+
+### macOS/Linux command equivalents
 
 ```bash
-curl -i -X POST http://localhost:8000/api/auth/register \
-  -H 'Content-Type: application/json' \
-  --data '{"email":"you@example.org","password":"a-long-password"}'
+docker compose up -d postgres
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r backend/requirements.txt
+cp backend/.env.example backend/.env
+# Edit backend/.env and set PREDICTION_PROVIDER=synthetic_test when no trained checkpoint is available.
+
+cd backend
+alembic upgrade head
+uvicorn app.main:app --reload
 ```
 
-Full setup, model installation and configuration details are in
-[`backend/README.md`](backend/README.md).
+Run the worker in another terminal with `source .venv/bin/activate`, `cd backend`, then `python -m app.workers.analysis_worker`. Run the frontend from the repository root with `npm ci` and `npm run dev`.
 
-## Production build
+## Use a trained model
+
+The FloodSight model implementation and trained weights are not bundled in this repository. The backend expects the model repository at `MODEL_REPO_PATH` and a compatible checkpoint at `MODEL_PATH`. See [the backend model setup guide](backend/README.md#model-setup) for the model contract and checkpoint fields.
+
+Set these values in `backend/.env`, then restart the API and worker:
+
+```dotenv
+PREDICTION_PROVIDER=trained_model
+MODEL_REPO_PATH=../multimodal-ai
+MODEL_PATH=../multimodal-ai/checkpoints/best.pt
+MODEL_DEVICE=auto
+```
+
+The model repository must contain the expected architecture and the checkpoint must match its documented input and normalization contract. Check provider readiness at `/health/model`. Missing or incompatible weights are reported as unavailable; the backend does not silently substitute synthetic output.
+
+For pipeline development without weights, use `PREDICTION_PROVIDER=synthetic_test` in a development environment. Synthetic mode is refused in production unless explicitly overridden by a separate production setting; it must not be used for flood response or decision-making.
+
+## Build and preview the frontend
 
 ```bash
 npm run build
 npm run preview
 ```
 
-The production bundle is written to `dist/`. The preview server runs at `http://localhost:4173`.
+The production files are written to `dist/`. The preview server listens on `http://localhost:4173` and proxies API requests to `http://127.0.0.1:8000` by default. Set `FLOODSIGHT_API_PROXY` to change the preview/dev server's backend target.
+
+For a separately hosted frontend, configure a reverse proxy for `/api` and `/health`, or define `window.FLOODSIGHT_API_BASE_URL` before the app bundle loads. Configure the backend's `CORS_ALLOW_ORIGINS` when the frontend and API use different origins. Use HTTPS and matching cookie settings in production.
+
+## Data and persistence
+
+- User accounts, sessions, analysis records, job state, and analysis results are stored by the backend in PostgreSQL.
+- Generated PDFs, GeoJSON, and raster artifacts are stored under `ARTIFACT_ROOT`; Docker Compose uses a persistent volume for artifacts and another for PostgreSQL.
+- Workspace theme and profile display details are saved in the current browser's local storage. They are not synced to an account or another device.
+- The active analysis ID is kept in session storage to restore the current results view after a page reload. It is not an authentication credential.
+- Authentication uses an HttpOnly session cookie. Passwords are hashed by the backend; session tokens are not exposed to frontend JavaScript.
+
+## API and health checks
+
+The full API reference is available at `http://127.0.0.1:8000/docs` when the API is running. Useful health routes are:
+
+| Route | What it checks |
+| --- | --- |
+| `/health/live` | API process is running |
+| `/health/ready` | Database connection is ready |
+| `/health/model` | Configured prediction provider readiness |
+| `/health/ready/capabilities` | Whether the API can accept new analyses |
+
+An accepted analysis request means the job was recorded; it does not mean processing succeeded. Follow the job status through a terminal state before relying on results.
+
+## Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| Frontend says it cannot reach the analysis service | Start the API and confirm `http://127.0.0.1:8000/health/live` responds. Check `FLOODSIGHT_API_PROXY` if you changed the backend port. |
+| Jobs stay queued | Start the analysis worker and check its terminal output. |
+| API readiness is unavailable | Confirm PostgreSQL is running with `docker compose ps`, then check `DATABASE_URL` and run `alembic upgrade head` from `backend/`. |
+| Model is unavailable | Check `/health/model`, `MODEL_REPO_PATH`, `MODEL_PATH`, and the checkpoint contract. Use the explicit synthetic provider only for development. |
+| Location search or map is blank/slow | Confirm internet access and check browser DevTools for blocked geocoding or tile requests. |
+| Report is not available | Wait for the analysis to complete and check the worker logs and `ARTIFACT_ROOT` permissions. |
 
 ## Tests
 
-```bash
-npm test          # builds the bundle, then runs the frontend Node tests
-```
-
-The frontend tests cover the API client (endpoint, method, credentials, error and
-`401` handling) and assert the built bundle wires authentication to the backend
-and contains no `sessionStorage` proof-of-login. With the API running, a live
-end-to-end check exercises register → me → logout → denied through the dev proxy:
+Frontend checks build the app and run Node's test runner:
 
 ```bash
-FLOODSIGHT_E2E_BASE_URL=http://localhost:3000 node --test tests/frontend/*.test.mjs
+npm test
 ```
 
-Backend tests use a dedicated test database; see [`backend/README.md`](backend/README.md).
+Backend tests require the development test dependencies and a dedicated test database. They recreate the test schema, so do not point `TEST_DATABASE_URL` at your development database. Setup and the exact command are documented in [`backend/README.md`](backend/README.md#tests).
 
-## Map and API connection
+## More documentation
 
-The interactive map uses public OpenStreetMap raster tiles and opens centered on Kerala for the initial New Analysis screen. It supports zooming, panning, and drawing the area-of-interest bounding box. Tile/network failures show a visible map warning instead of leaving a silent blank panel. Map tiles require an internet connection.
-
-The workspace API indicator checks the analysis-list endpoint and reflects the actual response (`CHECKING API`, `API CONNECTED`, or `API NOT CONNECTED`).
-
-The API client uses same-origin `/api/...` by default. To configure a separate backend, define `window.FLOODSIGHT_API_BASE_URL` before `/assets/app.js` loads, or configure a reverse proxy so `/api` is routed to FastAPI.
-
-Endpoints consumed by the frontend:
-
-- `POST /api/auth/register`
-- `POST /api/auth/login`
-- `POST /api/auth/logout`
-- `GET /api/auth/me`
-- `POST /api/analyses`
-- `GET /api/analyses`
-- `GET /api/analyses/{id}`
-- `GET /api/analyses/{id}/status`
-- `GET /api/analyses/{id}/facts`
-- `GET /api/analyses/{id}/map`
-- `GET /api/analyses/{id}/report`
-
-`POST /api/analyses` returns `202 Accepted` once the job is recorded; the frontend then polls `status` until a terminal state and only then reads `facts`, `map` and `report`. The active analysis identifier is kept in `sessionStorage`, so reloading the page or opening `/results?id=<uuid>` from the analysis history continues to show the same analysis. That identifier is UI state only — it is not a credential.
-
-## Authentication
-
-The frontend signs in against the backend; it does not simulate a session. The
-sign-up and login forms `POST` to `/api/auth/register` and `/api/auth/login`, the
-backend sets an `HttpOnly` session cookie, and the app calls `GET /api/auth/me` on
-load to restore the user. Route guards render a "verifying session" state until
-`/api/auth/me` answers, so the UI never reports a user that the backend has not
-confirmed. Any `401` from the API clears local auth state and returns the user to
-`/login`, and logout calls the backend to revoke the session before clearing it.
-
-No credential is stored in `localStorage` or `sessionStorage`; the browser holds
-only the session cookie, which JavaScript cannot read. Passwords are hashed with
-Argon2id and never returned. See [`backend/README.md`](backend/README.md) for the
-cookie flags, session lifetime, CSRF origin checks and login-attempt lockout.
-
-## Data integrity
-
-The frontend contains no flood-analysis results of its own. Availability checks, processing state, result facts, map layers, and reports all come from the backend. No flood polygons or impact metrics are fabricated in the browser. Authentication is real too: credentials are verified by the backend and the session is a server-side cookie, never a browser flag that the UI sets on its own.
-
-Flood extents displayed on the map are model predictions derived from Sentinel-1 radar imagery. They are not confirmed ground truth, and the interface states this wherever results are presented. Infrastructure layers show OpenStreetMap features that intersect the predicted extent; intersection indicates exposure, not confirmed damage.
-
-
-## Map and API troubleshooting
-
-The map uses public OpenStreetMap raster tiles and needs internet access. If it is still blank, open browser DevTools (F12) → Console and Network, reload, and check for blocked tile requests or JavaScript errors. The map resizes when its panel layout changes.
-
-The `API NOT CONNECTED` indicator means the backend did not respond. Check that the API is running on `http://localhost:8000` and that `curl http://localhost:8000/health/live` succeeds. The worker is a separate process; if analyses remain `queued`, the worker is not running.
-
-To point the frontend at a backend on another host, set `window.FLOODSIGHT_API_BASE_URL` in `index.html` before the app bundle loads, for example `http://127.0.0.1:8000`, and allow the frontend origin through the backend's `CORS_ALLOW_ORIGINS`. Do not change the indicator to connected unless the backend actually responds.
+- [Backend architecture, configuration, API, and processing details](backend/README.md)
+- [Production deployment](docs/deployment/production-deployment.md)
+- [Deployment readiness](docs/validation/deployment-readiness.md)
+- [Model architecture and training resources](multimodal-ai/README.md)
 
