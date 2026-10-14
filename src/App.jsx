@@ -233,7 +233,7 @@ function IntroPage() {
 function MapView({ draft, setDraft, interactive = false, height = '100%', onMapReady, dataLayers = null }) {
   const mapContainer = useRef(null);
   const mapRef = useRef(null);
-  const drawRef = useRef({ start: null, dragging: false });
+  const drawRef = useRef({ start: null, startPoint: null, dragging: false });
   const draftRef = useRef(draft);
   draftRef.current = draft;
   const setterRef = useRef(setDraft);
@@ -287,29 +287,62 @@ function MapView({ draft, setDraft, interactive = false, height = '100%', onMapR
       syncBox(map, draftRef.current.bbox);
       syncDataLayers(map, dataLayersRef.current);
     });
+    let handlePointerUp = null;
     if (interactive) {
       map.getCanvas().style.cursor = 'crosshair';
+      const previewNode = () => mapContainer.current?.parentElement?.querySelector('.map-draw-preview');
+      const updatePreview = (start, point) => {
+        const node = previewNode();
+        if (!node) return;
+        const left = Math.min(start.x, point.x), top = Math.min(start.y, point.y);
+        node.style.left = `${left}px`;
+        node.style.top = `${top}px`;
+        node.style.width = `${Math.abs(point.x - start.x)}px`;
+        node.style.height = `${Math.abs(point.y - start.y)}px`;
+      };
+      const finishDrawing = (end, point) => {
+        if (!drawRef.current.dragging || !drawRef.current.start) return;
+        const { start, startPoint } = drawRef.current;
+        drawRef.current = { start: null, startPoint: null, dragging: false };
+        map.dragPan.enable();
+        const preview = previewNode();
+        if (preview) preview.style.display = 'none';
+        const bbox = [[Number(Math.min(start.lng, end.lng).toFixed(5)), Number(Math.min(start.lat, end.lat).toFixed(5))], [Number(Math.max(start.lng, end.lng).toFixed(5)), Number(Math.max(start.lat, end.lat).toFixed(5))]];
+        if (Math.abs(point.x - startPoint.x) >= 6 && Math.abs(point.y - startPoint.y) >= 6 && Math.abs(bbox[1][0] - bbox[0][0]) > 0.001 && Math.abs(bbox[1][1] - bbox[0][1]) > 0.001) {
+          syncBox(map, bbox);
+          setterRef.current(prev => ({ ...prev, bbox }));
+        }
+      };
       map.on('mousedown', (e) => {
-        drawRef.current = { start: e.lngLat, dragging: true };
+        if (e.originalEvent?.button !== 0 || e.originalEvent?.shiftKey) return;
+        drawRef.current = { start: e.lngLat, startPoint: e.point, dragging: true };
+        const preview = previewNode();
+        if (preview) preview.style.display = 'block';
         map.dragPan.disable();
       });
       map.on('mousemove', (e) => {
         if (!drawRef.current.dragging || !drawRef.current.start) return;
-        const a = drawRef.current.start, b = e.lngLat;
-        syncBox(map, [[Math.min(a.lng,b.lng),Math.min(a.lat,b.lat)],[Math.max(a.lng,b.lng),Math.max(a.lat,b.lat)]]);
+        updatePreview(drawRef.current.startPoint, e.point);
       });
-      map.on('mouseup', (e) => {
-        if (!drawRef.current.dragging || !drawRef.current.start) return;
-        const a = drawRef.current.start, b = e.lngLat;
-        drawRef.current.dragging = false; drawRef.current.start = null; map.dragPan.enable();
-        const bbox = [[Number(Math.min(a.lng,b.lng).toFixed(5)),Number(Math.min(a.lat,b.lat).toFixed(5))],[Number(Math.max(a.lng,b.lng).toFixed(5)),Number(Math.max(a.lat,b.lat).toFixed(5))]];
-        if (Math.abs(bbox[1][0]-bbox[0][0]) > 0.001 && Math.abs(bbox[1][1]-bbox[0][1]) > 0.001) {
-          setterRef.current(prev => ({ ...prev, bbox }));
-        }
-      });
+      map.on('mouseup', (e) => finishDrawing(e.lngLat, e.point));
+      handlePointerUp = (event) => {
+        if (!drawRef.current.dragging) return;
+        const rect = map.getCanvas().getBoundingClientRect();
+        const point = {
+          x: Math.max(0, Math.min(rect.width, event.clientX - rect.left)),
+          y: Math.max(0, Math.min(rect.height, event.clientY - rect.top)),
+        };
+        finishDrawing(map.unproject([point.x, point.y]), point);
+      };
+      window.addEventListener('pointerup', handlePointerUp);
     }
     mapRef.current = map;
-    return () => { resizeObserver?.disconnect(); map.remove(); mapRef.current = null; };
+    return () => {
+      resizeObserver?.disconnect();
+      if (handlePointerUp) window.removeEventListener('pointerup', handlePointerUp);
+      map.remove();
+      mapRef.current = null;
+    };
   }, [interactive]);
   useEffect(() => {
     const map = mapRef.current;
@@ -319,7 +352,7 @@ function MapView({ draft, setDraft, interactive = false, height = '100%', onMapR
     const map = mapRef.current;
     if (map?.isStyleLoaded()) syncDataLayers(map, dataLayers);
   }, [dataLayers]);
-  return <div className="map-view" style={{ height }}><div ref={mapContainer} className="map-canvas"/><div className="map-load-error" hidden><b>Map tiles are unavailable</b><span>Check your internet connection and refresh the page. The map uses OpenStreetMap tiles.</span></div>{interactive && <div className="map-draw-hint"><span className="hint-crosshair">＋</span><span><b>Draw an area of interest</b><small>Click and drag on the map to define a bounding box</small></span></div>}<div className="map-status"><span className="map-status-dot"></span> BASE MAP <span className="map-status-divider"></span> {draft.bbox ? 'AREA SELECTED' : 'NO AREA SELECTED'}</div></div>;
+  return <div className="map-view" style={{ height }}><div ref={mapContainer} className="map-canvas"/>{interactive && <div className="map-draw-preview" aria-hidden="true"/>}<div className="map-load-error" hidden><b>Map tiles are unavailable</b><span>Check your internet connection and refresh the page. The map uses OpenStreetMap tiles.</span></div>{interactive && <div className="map-draw-hint"><span className="hint-crosshair">＋</span><span><b>Draw an area of interest</b><small>Drag to select; hold Shift and drag to pan</small></span></div>}<div className="map-status"><span className="map-status-dot"></span> BASE MAP <span className="map-status-divider"></span> {draft.bbox ? 'AREA SELECTED' : 'NO AREA SELECTED'}</div></div>;
 }
 
 function emptyGeoJSON() { return { type: 'FeatureCollection', features: [] }; }
@@ -392,29 +425,63 @@ function AnalyzePage() {
   const [searchError, setSearchError] = useState('');
   const [lookupBusy, setLookupBusy] = useState(false);
   const mapHandle = useRef(null);
+  const searchCache = useRef(new Map());
+  const searchController = useRef(null);
+  useEffect(() => () => {
+    searchController.current?.abort();
+    searchController.current = null;
+  }, []);
   const doSearch = async (e) => {
     e?.preventDefault(); setSearchError('');
-    if (!search.trim()) return;
+    const query = search.trim();
+    if (!query || lookupBusy) return;
+    if (query.length < 2) { setSearchError('Enter at least two characters to search.'); return; }
     setLookupBusy(true);
+    searchController.current?.abort();
+    const controller = new AbortController();
+    searchController.current = controller;
+    const timeout = setTimeout(() => controller.abort(), 8000);
     try {
-      const res = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(search.trim())}`, { headers: { 'Accept-Language': 'en' } });
-      if (!res.ok) throw new Error('Location search is temporarily unavailable.');
-      const found = await res.json();
+      let found = searchCache.current.get(query.toLowerCase());
+      if (!found) {
+        const res = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(query)}`, {
+          headers: { 'Accept-Language': 'en' },
+          signal: controller.signal,
+        });
+        if (!res.ok) throw new Error('Location search is temporarily unavailable. Try again shortly.');
+        found = await res.json();
+        searchCache.current.set(query.toLowerCase(), found);
+      }
       if (!found.length) throw new Error('No matching location found. Try a more specific place name.');
       const item = found[0], lon = Number(item.lon), lat = Number(item.lat);
-      setDraft(prev => ({ ...prev, location: item.display_name, bbox: prev.bbox || null }));
-      if (mapHandle.current) mapHandle.current.flyTo({ center: [lon,lat], zoom: 10, essential: true });
-    } catch (err) { setSearchError(err.message || 'Could not search this location.'); }
-    finally { setLookupBusy(false); }
+      setDraft(prev => ({ ...prev, location: item.display_name, bbox: null }));
+      const bounds = item.boundingbox?.map(Number);
+      if (mapHandle.current && bounds?.length === 4 && bounds.every(Number.isFinite)) {
+        const [south, north, west, east] = bounds;
+        mapHandle.current.fitBounds([[west, south], [east, north]], { padding: 48, duration: 450, maxZoom: 11 });
+      } else if (mapHandle.current && Number.isFinite(lon) && Number.isFinite(lat)) {
+        mapHandle.current.flyTo({ center: [lon, lat], zoom: 10, duration: 450 });
+      }
+    } catch (err) {
+      if (searchController.current === controller) {
+        setSearchError(err.name === 'AbortError' ? 'Location search took too long. Please try again.' : (err.message || 'Could not search this location.'));
+      }
+    } finally {
+      clearTimeout(timeout);
+      if (searchController.current === controller) {
+        searchController.current = null;
+        setLookupBusy(false);
+      }
+    }
   };
   const bboxText = draft.bbox ? `${draft.bbox[0][0]}, ${draft.bbox[0][1]}  →  ${draft.bbox[1][0]}, ${draft.bbox[1][1]}` : 'No bounding box drawn';
   return <AppLayout title="New Analysis" subtitle="Define the area of interest and the flood event date." action={<span className="step-progress"><b>STEP 01</b><i></i><span>DEFINE AREA & DATE</span></span>}>
     <div className="analysis-stepper"><div className="step-item current"><span>01</span><div><b>Define area & date</b><small>Set analysis inputs</small></div></div><span className="step-connector"/><div className="step-item"><span>02</span><div><b>Review</b><small>Confirm selection</small></div></div><span className="step-connector"/><div className="step-item"><span>03</span><div><b>Data check</b><small>Check source availability</small></div></div></div>
     <div className="analyze-grid"><section className="setup-panel"><div className="panel-header"><div><h3>Define your area</h3><p>Search for a location, then draw a bounding box on the map.</p></div><span className="required-label">REQUIRED INPUTS</span></div>
-      <form className="location-search" onSubmit={doSearch}><label htmlFor="location-search">Location search</label><div className="search-input-wrap"><Icon name="search" size={18}/><input id="location-search" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search for a place or region"/><button className="button button-secondary button-small" type="submit" disabled={lookupBusy}>{lookupBusy?'Searching…':'Search'}</button></div>{searchError&&<p className="inline-error">{searchError}</p>}</form>
-      <div className="map-edit-toolbar"><span><Icon name="map" size={16}/> AREA OF INTEREST</span><div><button className="text-button" onClick={()=>{setDraft(p=>({...p,bbox:null}));}} disabled={!draft.bbox}>Delete box</button><button className="text-button" onClick={()=>{setDraft(p=>({...p,bbox:null}));if(mapHandle.current)mapHandle.current.getCanvas().focus()}} disabled={!draft.bbox}>Redraw box</button></div></div>
+      <form className="location-search" onSubmit={doSearch}><label htmlFor="location-search">Location search</label><div className="search-input-wrap"><Icon name="search" size={18}/><input id="location-search" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search for a city, region, or place" aria-describedby={searchError?'location-search-message':undefined}/><button className="button button-secondary button-small" type="submit" disabled={lookupBusy}>{lookupBusy?'Searching…':'Find location'}</button></div>{searchError&&<p className="inline-error" id="location-search-message" role="status">{searchError}</p>}</form>
+      <div className="map-edit-toolbar"><span><Icon name="map" size={16}/> AREA OF INTEREST</span><div><button className="text-button" onClick={()=>{setDraft(p=>({...p,bbox:null}));}} disabled={!draft.bbox}>Clear area</button></div></div>
       <div className="analysis-map"><MapView draft={draft} setDraft={setDraft} interactive onMapReady={map=>{mapHandle.current=map}}/></div>
-      <div className="map-help"><span className="help-icon"><Icon name="alert" size={16}/></span><p><b>How to select an area</b><br/>Click and drag on the map to draw a rectangle. Use the map controls to zoom and pan. Draw again to replace the current bounding box.</p></div>
+      <div className="map-help"><span className="help-icon"><Icon name="map" size={16}/></span><p><b>Select an area</b><br/>Drag to draw a rectangle. Hold Shift while dragging to pan, or use the map controls to zoom.</p></div>
       <div className="field-grid"><label>Selected location<div className="readonly-field"><Icon name="pin" size={16}/><span>{draft.location||'No location selected'}</span></div></label><label>Flood date<input type="date" value={draft.date} max={new Date().toISOString().slice(0,10)} onChange={e=>setDraft(p=>({...p,date:e.target.value}))}/></label></div>
       <div className="bbox-field"><div><b>Bounding coordinates</b><small>West, South → East, North</small></div><code>{bboxText}</code></div>
       <div className="setup-actions"><button className="button button-secondary" onClick={()=>navigate('/workspace')}>Cancel</button><button className="button button-primary" disabled={!draft.date||!draft.bbox} onClick={()=>navigate('/review')}>Review analysis <Icon name="arrow" size={16}/></button></div>
