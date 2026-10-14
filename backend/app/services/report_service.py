@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import re
+from html import escape
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -13,6 +15,7 @@ from reportlab.lib.units import mm
 from reportlab.platypus import (
     BaseDocTemplate,
     Frame,
+    KeepTogether,
     PageTemplate,
     Paragraph,
     Spacer,
@@ -194,26 +197,29 @@ class ReportService:
     def _method_story(self, result: AnalysisResult, styles) -> list[Any]:
         story: list[Any] = [Spacer(1, 4 * mm), Paragraph("Methodology", styles["heading"])]
         algorithm = result.algorithm or {}
-        story.append(Paragraph(str(result.methodology or "Not recorded."), styles["body"]))
         steps = algorithm.get("steps") or []
         if steps:
             for index, step in enumerate(steps, start=1):
-                story.append(Paragraph(f"{index}. {step}", styles["step"]))
+                story.append(Paragraph(f"{index}. {escape(str(step))}", styles["step"]))
             reference = algorithm.get("reference")
             if reference:
-                story.append(Paragraph(f"Reference: {reference}", styles["muted"]))
+                story.append(Paragraph(f"Reference: {escape(str(reference))}", styles["muted"]))
+        else:
+            methodology = str(result.methodology or "Not recorded.")
+            # Providers often serialize the whole preprocessing pipeline into one
+            # semicolon-delimited paragraph. Present each item as a readable step.
+            items = [part.strip(" .;\n\t") for part in re.split(r";\s*", methodology) if part.strip(" .;\n\t")]
+            for index, item in enumerate(items, start=1):
+                story.append(Paragraph(f"{index}. {escape(item)}", styles["step"]))
         return story
 
     def _measurements_story(self, result: AnalysisResult, styles) -> list[Any]:
         measurements = result.measurements or {}
         synthetic = bool(measurements.get("predictions_are_synthetic"))
         heading = "Synthetic test measurements" if synthetic else "Flood extent results"
-        story: list[Any] = [
-            Spacer(1, 4 * mm),
-            Paragraph(heading, styles["heading"]),
-        ]
+        section: list[Any] = [Paragraph(heading, styles["heading"])]
         if result.flood_geometry and not (result.flood_geometry.get("features") or []):
-            story.append(Paragraph(
+            section.append(Paragraph(
                 (
                     "The synthetic test provider produced no mask above the configured minimum "
                     "area within the area of interest. No extent is reported."
@@ -262,7 +268,9 @@ class ReportService:
                 f"{_fmt_number((result.confidence or {}).get('index'))}",
             ],
         ]
-        story.append(_table(rows, styles, colWidths=[70 * mm, 80 * mm]))
+        section.append(_table(rows, styles, colWidths=[70 * mm, 80 * mm]))
+        # Keep the section title and its table together when a page is nearly full.
+        story: list[Any] = [Spacer(1, 4 * mm), KeepTogether(section)]
         confidence = result.confidence or {}
         if confidence.get("definition"):
             story.append(Spacer(1, 2 * mm))
@@ -396,26 +404,29 @@ class ReportService:
                 "No warnings or limitations were recorded for this analysis.", styles["body"]
             ))
         for warning in warnings:
-            story.append(Paragraph(f"Warning: {warning}", styles["warning"]))
+            story.append(Paragraph(f"Warning: {escape(str(warning))}", styles["warning"]))
         for limitation in limitations:
-            story.append(Paragraph(f"Limitation: {limitation}", styles["limitation"]))
+            story.append(Paragraph(f"Limitation: {escape(str(limitation))}", styles["limitation"]))
         return story
 
     def _map_story(self, analysis: Analysis, result: AnalysisResult, styles) -> list[Any]:
         geometry = _geometry_from_feature_collection(result.flood_geometry)
-        story: list[Any] = [Spacer(1, 4 * mm), Paragraph("Flood extent overview", styles["heading"])]
+        story: list[Any] = [Spacer(1, 4 * mm)]
         drawing = _map_drawing(analysis, geometry, self._page_size)
         if drawing is None:
             story.append(Paragraph(
                 "No flood geometry is available to display.", styles["warning"]
             ))
             return story
-        story.append(drawing)
-        story.append(Paragraph(
-            "Outline of the mapped flood extent within the area of interest. This figure is "
-            "drawn from the same validated geometry returned by the map endpoint.",
-            styles["muted"],
-        ))
+        story.append(KeepTogether([
+            Paragraph("Flood extent overview", styles["heading"]),
+            drawing,
+            Paragraph(
+                "Flood extent outlines within the area of interest. The figure uses the same "
+                "validated geometry returned by the map endpoint.",
+                styles["muted"],
+            ),
+        ]))
         return story
 
 
@@ -480,8 +491,8 @@ def _styles() -> dict[str, ParagraphStyle]:
 
 
 def _table(rows: list[list[str]], styles, colWidths: list[float]) -> Table:
-    data = [[Paragraph(str(cell), styles["cell"]) for cell in row] for row in rows]
-    table = Table(data, colWidths=colWidths, hAlign="LEFT")
+    data = [[Paragraph(escape(str(cell)), styles["cell"]) for cell in row] for row in rows]
+    table = Table(data, colWidths=colWidths, hAlign="LEFT", repeatRows=1)
     table.setStyle(
         TableStyle(
             [
@@ -501,7 +512,10 @@ def _table(rows: list[list[str]], styles, colWidths: list[float]) -> Table:
 
 
 def _kv_table(pairs: list[tuple[str, str]], styles) -> Table:
-    rows = [[Paragraph(key, styles["cell"]), Paragraph(value, styles["cell"])] for key, value in pairs]
+    rows = [
+        [Paragraph(escape(str(key)), styles["cell"]), Paragraph(escape(str(value)), styles["cell"])]
+        for key, value in pairs
+    ]
     table = Table(rows, colWidths=[48 * mm, 102 * mm], hAlign="LEFT")
     table.setStyle(
         TableStyle(
@@ -543,46 +557,32 @@ def _map_drawing(analysis: Analysis, geometry: BaseGeometry | None, page_size):
     span_lon = max_lon - min_lon
     span_lat = max_lat - min_lat
 
-    def project(geom: BaseGeometry) -> list[list[float]]:
-        """Flatten polygon rings into the point list reportlab's PolyLine expects."""
+    def project_ring(ring) -> list[list[float]]:
+        """Project one ring without connecting it to neighboring polygons."""
+        return [
+            [(x - min_lon) / span_lon * width, (y - min_lat) / span_lat * height]
+            for x, y in ring.coords
+        ]
+
+    def add_outlines(geom: BaseGeometry, *, stroke, stroke_width: float, dash=None) -> None:
         parts = getattr(geom, "geoms", [geom])
-        points: list[list[float]] = []
         for part in parts:
             if part.geom_type != "Polygon":
                 continue
             for ring in [part.exterior, *part.interiors]:
-                points.extend(
-                    [
-                        (x - min_lon) / span_lon * width,
-                        (y - min_lat) / span_lat * height,
-                    ]
-                    for x, y in ring.coords
+                drawing.add(
+                    PolyLine(
+                        project_ring(ring),
+                        strokeColor=stroke,
+                        strokeWidth=stroke_width,
+                        strokeDashArray=dash,
+                        fillColor=None,
+                    )
                 )
-        return points
 
-    aoi_points = project(aoi)
-    if aoi_points:
-        drawing.add(
-            PolyLine(
-                aoi_points,
-                strokeColor=ACCENT,
-                strokeWidth=0.9,
-                strokeDashArray=[3, 2],
-                fillColor=None,
-            )
-        )
+    add_outlines(aoi, stroke=ACCENT, stroke_width=0.9, dash=[3, 2])
     if geometry is not None and not geometry.is_empty:
-        flood_points = project(geometry)
-        if flood_points:
-            drawing.add(
-                PolyLine(
-                    flood_points,
-                    strokeColor=colors.HexColor("#c0504d"),
-                    strokeWidth=1.1,
-                    fillColor=colors.HexColor("#c0504d"),
-                    fillOpacity=0.35,
-                )
-            )
+        add_outlines(geometry, stroke=colors.HexColor("#c0504d"), stroke_width=1.1)
     return drawing
 
 
