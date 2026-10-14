@@ -6,6 +6,11 @@ import { api } from './api.js';
 const AppContext = createContext(null);
 const useApp = () => useContext(AppContext);
 const pipeline = ['QUEUED','VALIDATING','SEARCHING_DATA','DOWNLOADING','PREPROCESSING','FLOOD_MAPPING','DAMAGE_ANALYSIS','CONNECTIVITY_ANALYSIS','GENERATING_REPORT','COMPLETED','FAILED'];
+const readLocalValue = (key, fallback) => {
+  try { const value = localStorage.getItem(key); return value ? JSON.parse(value) : fallback; }
+  catch { return fallback; }
+};
+const profileStorageKey = (userId) => `floodsight-profile:${userId}`;
 
 function Icon({ name, size = 18 }) {
   const paths = {
@@ -42,7 +47,8 @@ function AppProvider({ children }) {
   const [draft, setDraft] = useState({ location: '', date: '', bbox: null });
   // Restored from sessionStorage so a page reload keeps the active analysis id.
   const [analysisId, setAnalysisId] = useState(() => sessionStorage.getItem('floodsight-analysis-id') || '');
-  const [theme, setTheme] = useState('dark');
+  const [preferences, setPreferences] = useState(() => ({ theme: 'dark', mapStyle: 'Standard', appearance: 'Muted', ...readLocalValue('floodsight-preferences', {}) }));
+  const [theme, setTheme] = useState(() => readLocalValue('floodsight-preferences', {})?.theme || 'dark');
   const [profile, setProfile] = useState({ name: '', username: '', email: '' });
   // Authentication is only ever confirmed by the backend. Until /api/auth/me answers
   // the status stays 'loading' so the UI never reports a user that is not signed in.
@@ -58,7 +64,9 @@ function AppProvider({ children }) {
       setAuth({ status: 'anonymous', user: null });
       return;
     }
-    setProfile({ name: user.full_name || '', username: (user.email || '').split('@')[0], email: user.email || '' });
+    const defaults = { name: user.full_name || '', username: (user.email || '').split('@')[0], email: user.email || '' };
+    const savedProfile = readLocalValue(profileStorageKey(user.id), {});
+    setProfile({ ...defaults, ...savedProfile });
     setAuth({ status: 'authenticated', user });
   }, []);
   const refreshAuth = useCallback(async () => {
@@ -95,7 +103,13 @@ function AppProvider({ children }) {
     }
     applyUser(null);
   }, [applyUser]);
-  const value = useMemo(() => ({ draft, setDraft, analysisId, setAnalysisId: updateAnalysisId, theme, setTheme, profile, setProfile, auth, login, signup, logout, refreshAuth }), [draft, analysisId, theme, profile, auth, login, signup, logout, refreshAuth, updateAnalysisId]);
+  const savePreferences = useCallback((updates) => {
+    const next = { ...preferences, ...updates };
+    localStorage.setItem('floodsight-preferences', JSON.stringify(next));
+    setPreferences(next);
+    if (next.theme) setTheme(next.theme);
+  }, [preferences]);
+  const value = useMemo(() => ({ draft, setDraft, analysisId, setAnalysisId: updateAnalysisId, theme, setTheme, preferences, savePreferences, profile, setProfile, auth, login, signup, logout, refreshAuth }), [draft, analysisId, theme, preferences, savePreferences, profile, auth, login, signup, logout, refreshAuth, updateAnalysisId]);
   return <AppContext.Provider value={value}><div className={`app-shell theme-${theme}`}>{children}</div></AppContext.Provider>;
 }
 
@@ -581,17 +595,19 @@ function ReportPage() {
 }
 
 function SettingsPage() {
-  const { theme, setTheme, profile, setProfile, logout } = useApp();
-  const [appearance, setAppearance] = useState('Muted');
-  const [mapStyle, setMapStyle] = useState('Standard');
-  const [saved, setSaved] = useState(false);
+  const { theme, setTheme, preferences, savePreferences, profile, setProfile, auth, logout } = useApp();
+  const [appearance, setAppearance] = useState(preferences.appearance || 'Muted');
+  const [mapStyle, setMapStyle] = useState(preferences.mapStyle || 'Standard');
+  const [preferencesSaved, setPreferencesSaved] = useState(false);
+  const [profileSaved, setProfileSaved] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const navigate = useNavigate();
   const signOut = useCallback(async () => { await logout(); navigate('/login', { replace: true }); }, [logout, navigate]);
-  const save = (e)=>{e.preventDefault();setSaved(true);setTimeout(()=>setSaved(false),2400)};
+  const savePrefs = (e)=>{e.preventDefault();savePreferences({theme,mapStyle,appearance});setPreferencesSaved(true);setTimeout(()=>setPreferencesSaved(false),2400)};
+  const saveProfile = (e)=>{e.preventDefault();if(!auth.user?.id)return;const savedProfile={name:profile.name.trim(),username:profile.username.trim(),email:profile.email.trim()};localStorage.setItem(profileStorageKey(auth.user.id),JSON.stringify(savedProfile));setProfile(savedProfile);setProfileSaved(true);setTimeout(()=>setProfileSaved(false),2400)};
   return <AppLayout active="settings" title="Settings" subtitle="Personalize your workspace and manage account preferences."><div className="settings-layout"><section className="settings-main">
-    <form className="panel settings-panel" onSubmit={save}><div className="settings-section-heading"><span className="settings-icon"><Icon name="layers"/></span><div><h3>General / Personalization</h3><p>Adjust how FloodSight appears on your device.</p></div></div><div className="setting-row"><div><b>Appearance</b><small>Choose your workspace theme.</small></div><div className="segmented"><button type="button" className={theme==='dark'?'selected':''} onClick={()=>setTheme('dark')}>Dark</button><button type="button" className={theme==='light'?'selected':''} onClick={()=>setTheme('light')}>Light</button></div></div><div className="setting-row"><div><b>Map appearance</b><small>Base map presentation.</small></div><select value={mapStyle} onChange={e=>setMapStyle(e.target.value)}><option>Standard</option><option>Muted</option><option>High contrast</option></select></div><div className="setting-row"><div><b>Contrast / Accent</b><small>Choose a restrained interface accent.</small></div><select value={appearance} onChange={e=>setAppearance(e.target.value)}><option>Muted</option><option>Cyan</option><option>Blue</option></select></div><div className="settings-save"><button className="button button-primary" type="submit">Save preferences</button>{saved&&<span className="save-confirm"><Icon name="check" size={15}/> Preferences saved for this session</span>}</div></form>
-    <form className="panel settings-panel" onSubmit={save}><div className="settings-section-heading"><span className="settings-icon"><Icon name="globe"/></span><div><h3>Account</h3><p>Update the profile details shown in your workspace.</p></div></div><div className="settings-form-grid"><label>Name<input value={profile.name} onChange={e=>setProfile({...profile,name:e.target.value})} placeholder="Full name"/></label><label>Username<input value={profile.username} onChange={e=>setProfile({...profile,username:e.target.value})} placeholder="Username"/></label><label className="span-2">Email<input type="email" value={profile.email} onChange={e=>setProfile({...profile,email:e.target.value})} placeholder="Email address"/></label></div><div className="settings-save"><button className="button button-primary" type="submit">Save Profile</button>{saved&&<span className="save-confirm"><Icon name="check" size={15}/> Profile saved for this session</span>}</div></form>
+    <form className="panel settings-panel" onSubmit={savePrefs}><div className="settings-section-heading"><span className="settings-icon"><Icon name="layers"/></span><div><h3>General / Personalization</h3><p>Adjust how FloodSight appears on your device.</p></div></div><div className="setting-row"><div><b>Appearance</b><small>Choose your workspace theme.</small></div><div className="segmented"><button type="button" className={theme==='dark'?'selected':''} onClick={()=>setTheme('dark')}>Dark</button><button type="button" className={theme==='light'?'selected':''} onClick={()=>setTheme('light')}>Light</button></div></div><div className="setting-row"><div><b>Map appearance</b><small>Base map presentation.</small></div><select value={mapStyle} onChange={e=>setMapStyle(e.target.value)}><option>Standard</option><option>Muted</option><option>High contrast</option></select></div><div className="setting-row"><div><b>Contrast / Accent</b><small>Choose a restrained interface accent.</small></div><select value={appearance} onChange={e=>setAppearance(e.target.value)}><option>Muted</option><option>Cyan</option><option>Blue</option></select></div><div className="settings-save"><button className="button button-primary" type="submit">Save preferences</button>{preferencesSaved&&<span className="save-confirm"><Icon name="check" size={15}/> Preferences saved on this device</span>}</div></form>
+    <form className="panel settings-panel" onSubmit={saveProfile}><div className="settings-section-heading"><span className="settings-icon"><Icon name="globe"/></span><div><h3>Account</h3><p>Update the profile details shown in your workspace.</p></div></div><div className="settings-form-grid"><label>Name<input value={profile.name} onChange={e=>setProfile({...profile,name:e.target.value})} placeholder="Full name"/></label><label>Username<input value={profile.username} onChange={e=>setProfile({...profile,username:e.target.value})} placeholder="Username"/></label><label className="span-2">Email<input type="email" value={profile.email} onChange={e=>setProfile({...profile,email:e.target.value})} placeholder="Email address"/></label></div><div className="settings-save"><button className="button button-primary" type="submit">Save Profile</button>{profileSaved&&<span className="save-confirm"><Icon name="check" size={15}/> Profile saved on this device</span>}</div></form>
     <section className="panel settings-panel"><div className="settings-section-heading"><span className="settings-icon"><Icon name="shield"/></span><div><h3>Security & Login</h3><p>Account security controls.</p></div></div><div className="setting-row"><div><b>Verified email</b><small>{profile.email?'Email verification is not implemented in this build.':'No email address on profile.'}</small></div><span className="neutral-chip">Not verified</span></div><div className="setting-row"><div><b>Change password</b><small>Password changes are not available yet.</small></div><button className="button button-secondary button-small" onClick={()=>setShowPassword(!showPassword)}>{showPassword?'Hide':'Change password'}</button></div>{showPassword&&<div className="notice notice-info"><Icon name="alert" size={16}/> Password changes are not available in this build.</div>}<div className="setting-row"><div><b>Active session</b><small>You are signed in on this browser.</small></div><span className="active-chip"><i/> Active</span></div><div className="setting-row"><div><b>Log out all devices</b><small>End the current session on this browser.</small></div><button className="button button-danger-outline button-small" onClick={signOut}>Log out</button></div></section>
   </section><aside className="settings-aside panel"><span className="settings-aside-icon"><Icon name="shield" size={22}/></span><h3>Your workspace, your way</h3><p>These preferences are stored locally in this browser. Account settings are not synced across devices yet.</p><div className="settings-aside-line"/><div className="aside-info-row"><span>Theme</span><b>{theme==='dark'?'Dark':'Light'}</b></div><div className="aside-info-row"><span>Map style</span><b>{mapStyle}</b></div><div className="aside-info-row"><span>Accent</span><b>{appearance}</b></div></aside></div></AppLayout>;
 }
