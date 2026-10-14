@@ -1,6 +1,6 @@
 # FloodSight AI
 
-FloodSight AI is a web application for exploring potential flood extent from satellite radar imagery. It lets an analyst define an area and event date, queue an analysis, inspect the returned map and measurements, and download a situation report.
+FloodSight AI is a geospatial disaster-intelligence research prototype. Its web application connects Sentinel-1 radar analysis to a geospatial processing workflow, potential asset-exposure context, and generated situation reports. A companion research CLI explores additional supplied optical and terrain data. The system is designed to help analysts review evidence; it does not verify damage or issue operational flood warnings.
 
 > **Interpret results carefully.** A trained model produces predictions, not confirmed ground truth. The development-only `synthetic_test` provider produces labelled test patterns, not flood predictions. OpenStreetMap intersections indicate possible exposure; they do not confirm damage.
 
@@ -27,6 +27,17 @@ FloodSight AI is a web application for exploring potential flood extent from sat
 - Open a generated PDF situation report and download supported geospatial artifacts.
 - Register and sign in with a server-managed session.
 - Choose a light or dark workspace theme and save profile display details on the current browser.
+
+### What is multimodal today
+
+The web application and the companion model repository are separate workflows. This distinction keeps the product description accurate:
+
+| Workflow | Implemented inputs and outputs | Current boundary |
+| --- | --- | --- |
+| Web app and FastAPI worker | Sentinel-1 VV/VH radar imagery, flood extent and measurements, OpenStreetMap exposure context, PDF and geospatial artifacts | Sentinel-1 drives the web inference path. The OSM overlay describes potential exposure, not confirmed damage. |
+| `multimodal-ai/worker.py` research CLI | Sentinel-1 prediction, optional supplied Sentinel-2 Green/NIR comparisons, optional supplied DEM terrain screening, OSM context, uncertainty raster, HTML report and map dashboard | Sentinel-2 and DEM inputs are optional and caller-supplied; they are not automatically downloaded or fused into the web app's model prediction. See the [model repository README](multimodal-ai/README.md). |
+
+The CLI's uncertainty raster is a predictive-entropy proxy, not calibrated confidence. Its terrain routing is a terrain-only screening aid, not hydraulic flood modeling. Both workflows require human review.
 
 ## How it works
 
@@ -149,6 +160,23 @@ MODEL_DEVICE=auto
 
 The model repository must contain the expected architecture and the checkpoint must match its documented input and normalization contract. Check provider readiness at `/health/model`. Missing or incompatible weights are reported as unavailable; the backend does not silently substitute synthetic output.
 
+### Checkpoint availability and benchmark
+
+No `best.pt` checkpoint or sample analysis-ready raster pair is included in this repository, and this README does not provide a checkpoint download link. To run real inference, obtain a compatible checkpoint from the project maintainers or train one using the [training guide](multimodal-ai/MODEL_TRAINING.md), then set `MODEL_PATH`. The training guide describes the required raster format and the event-held-out protocol.
+
+The current documented research benchmark trained on Events 1111002–1111004, selected the checkpoint and threshold on validation Event 1111006, and evaluated once on held-out Event 1111005 (1,369 scenes). The validation-selected threshold was 0.49.
+
+| Held-out Event 1111005 metric | Result |
+| --- | ---: |
+| Flood IoU, all-scene macro | 13.95% |
+| F1, all-scene macro | 15.42% |
+| Precision / recall, all-scene macro | 16.90% / 15.80% |
+| Flood IoU, pixel pooled | 28.58% |
+| F1, pixel pooled | 44.45% |
+| Pixel accuracy | 94.85% |
+
+These are research results, not operational performance claims. Flood-positive performance is weak, and pixel accuracy is dominated by background pixels; it must not be presented as flood-detection accuracy. Upstream label provenance and broader independent regional validation remain limitations. See the model repository's [evaluation report](multimodal-ai/docs/HIMALAYAN_EVALUATION.md) for the full protocol and caveats.
+
 For pipeline development without weights, use `PREDICTION_PROVIDER=synthetic_test` in a development environment. Synthetic mode is refused in production unless explicitly overridden by a separate production setting; it must not be used for flood response or decision-making.
 
 ## Build and preview the frontend
@@ -207,7 +235,17 @@ Backend tests require the development test dependencies and a dedicated test dat
 ## More documentation
 
 - [Backend architecture, configuration, API, and processing details](backend/README.md)
+- [Model architecture and training guide](multimodal-ai/MODEL_TRAINING.md)
+- [Model benchmark, limitations, and research CLI](multimodal-ai/README.md)
+- [Track B requirement status](multimodal-ai/docs/HACKATHON_REQUIREMENTS.md)
 - [Production deployment](docs/deployment/production-deployment.md)
 - [Deployment readiness](docs/validation/deployment-readiness.md)
-- [Model architecture and training resources](multimodal-ai/README.md)
+
+## Automated workflow and AI scope
+
+The analysis worker runs a defined sequence of validation, imagery search, preprocessing, flood mapping, exposure assessment, and report generation. This is an automated geospatial workflow; the project does not currently use a generative language model or claim an autonomous AI agent. Reports summarize measured results and provenance from the pipeline for analyst review.
+
+## License
+
+The source code distributed in this FloodSight-AI repository is released under the [MIT License](LICENSE). This does not change the terms for third-party datasets, satellite imagery, model weights, or code obtained separately from upstream repositories; follow their respective terms and attribution requirements.
 

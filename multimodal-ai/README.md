@@ -103,4 +103,4 @@ The validation event is used for checkpoint selection and threshold calibration.
 - [Testing strategy](docs/TESTING_STRATEGY.md)
 - [Training guide](MODEL_TRAINING.md)
 
-KuroSiwo dataset information and attribution: [official dataset repository](https://github.com/Orion-AI-Lab/KuroSiwo). Dataset terms apply to any data you use. This repository currently contains no LICENSE file, so no software license is declared here.
+KuroSiwo dataset information and attribution: [official dataset repository](https://github.com/Orion-AI-Lab/KuroSiwo). Dataset terms apply to any data you use. The FloodSight-AI repository that includes this directory now provides a root MIT license for the source distributed there. The upstream model repository may have separate terms when obtained independently; check its license status before reusing it from that source.
