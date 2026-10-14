@@ -191,14 +191,6 @@ class FloodSegmentationModel:
             )
 
     def _initialise(self):
-        try:
-            import torch
-        except ImportError as exc:
-            raise ModelUnavailableError(
-                "PyTorch is not installed, so model inference cannot run."
-            ) from exc
-        self._torch = torch
-
         checkpoint_path = self._settings.model_path
         if checkpoint_path is None:
             raise ModelUnavailableError(
@@ -208,8 +200,15 @@ class FloodSegmentationModel:
         if not checkpoint_path.is_file():
             raise ModelUnavailableError(
                 "The configured model checkpoint does not exist. Train the model with "
-                "train.py or set MODEL_PATH to an existing checkpoint."
+                "train.py or point MODEL_PATH at a valid checkpoint."
             )
+        try:
+            import torch
+        except ImportError as exc:
+            raise ModelUnavailableError(
+                "PyTorch is not installed, so model inference cannot run."
+            ) from exc
+        self._torch = torch
 
         module = _load_model_module(self._settings.model_repo_path)
         device = self._select_device(torch)

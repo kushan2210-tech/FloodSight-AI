@@ -53,9 +53,12 @@ class FloodSightError(Exception):
             self.retryable = retryable
 
 
+HTTP_422 = getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422)
+
+
 class DomainValidationError(FloodSightError):
     code = "validation_error"
-    status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+    status_code = HTTP_422
 
 
 class NotFoundError(FloodSightError):
@@ -184,7 +187,7 @@ def register_exception_handlers(app: FastAPI) -> None:
                    "fields": [item["field"] for item in fields]},
         )
         return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=HTTP_422,
             content=error_payload(
                 "validation_error", "Request payload failed validation.", {"fields": fields}
             ),

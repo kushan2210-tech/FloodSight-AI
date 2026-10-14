@@ -30,7 +30,7 @@ def database_url() -> str:
     try:
         from sqlalchemy import create_engine, text
 
-        engine = create_engine(url, pool_pre_ping=True)
+        engine = create_engine(url, pool_pre_ping=True, connect_args={"connect_timeout": 2})
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
         engine.dispose()
@@ -40,14 +40,14 @@ def database_url() -> str:
 
 
 @pytest.fixture(scope="session")
-def settings(database_url, tmp_path_factory):
+def settings(tmp_path_factory):
     from app.core.config import Settings, reset_settings_cache
 
     artifacts = tmp_path_factory.mktemp("artifacts")
     reset_settings_cache()
     return Settings(
         environment="test",
-        database_url=database_url,
+        database_url=_database_url(),
         artifact_root=artifacts,
         model_repo_path=BACKEND_ROOT.parent / "multimodal-ai",
         model_path=None,
@@ -60,7 +60,7 @@ def settings(database_url, tmp_path_factory):
 
 
 @pytest.fixture()
-def db_schema(settings):
+def db_schema(database_url, settings):
     """Create the schema once per session and truncate between tests."""
     from sqlalchemy import create_engine, text
 
