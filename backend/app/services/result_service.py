@@ -124,16 +124,39 @@ def build_facts(analysis: Analysis, result: AnalysisResult | None) -> dict[str, 
                 "model": model_info,
                 "imagery": result.imagery or [],
                 "software": provenance.get("software"),
+                "settlement_counts": (result.settlements or {}).get("settlement_counts")
+                or measurements.get("settlement_counts"),
+                "settlements": (result.settlements or {}).get("settlements")
+                or measurements.get("settlements"),
+                "debris_detection": measurements.get("debris_detection"),
+                "cross_sensor_optical": measurements.get("cross_sensor_optical"),
+                "dem_flow_analysis": measurements.get("dem_flow_analysis"),
+                "anti_hallucination_metrics": measurements.get("anti_hallucination_metrics"),
+                "uncertainty": measurements.get("uncertainty"),
+                "infrastructure_detail": result.infrastructure or {},
+                "buildings_affected": (result.infrastructure or {}).get("buildings_intersecting_flood")
+                or (result.infrastructure or {}).get("buildings_intersecting")
+                or measurements.get("buildings_affected"),
+                "road_length_affected_km": (result.infrastructure or {}).get("roads_length_km_flooded")
+                or measurements.get("road_length_affected_km"),
+                "bridges_affected": measurements.get("bridges_affected")
+                or (result.infrastructure or {}).get("bridges_affected"),
             },
             "buildings_intersecting_flood": (result.infrastructure or {}).get(
                 "buildings_intersecting_flood"
-            ),
+            )
+            or (result.infrastructure or {}).get("buildings_intersecting")
+            or measurements.get("buildings_affected"),
             "road_segments_intersecting_flood": (result.infrastructure or {}).get(
                 "road_segments_intersecting_flood"
-            ),
+            )
+            or (result.infrastructure or {}).get("road_segments_intersecting")
+            or measurements.get("road_segments_intersecting_flood"),
             "settlements_in_flood_zone": (result.settlements or {}).get(
                 "settlements_in_flood_zone"
-            ),
+            )
+            or (result.settlements or {}).get("settlements_inside_flood_extent")
+            or measurements.get("settlements_in_flood_zone"),
             "map_available": True,
             "report_available": bool(analysis.report_available),
         }

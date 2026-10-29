@@ -129,3 +129,42 @@
 @media(max-width:600px){
   .kpi-dashboard{grid-template-columns:1fr}
 }
+
+
+/* Enhanced FloodSight Scientific KPI & Triage Styling */
+.kpi-card.kpi-infra::before{background:#f2c779}
+.kpi-card.kpi-isolated::before{background:#e76f79}
+.kpi-card.kpi-detour::before{background:#f59e0b}
+.kpi-card.kpi-debris::before{background:#fb923c}
+.kpi-card.kpi-optical::before{background:#38bdf8}
+.kpi-card.kpi-dem::before{background:#a78bfa}
+.kpi-card.kpi-filter::before{background:#34d399}
+
+.triage-table{width:100%;border-collapse:collapse;margin-top:14px;font-size:11px}
+.triage-table th{background:#0e1e2d;color:#7893a6;text-align:left;padding:10px 12px;font:9px 'DM Mono',monospace;border-bottom:1px solid #233a4c}
+.triage-table td{padding:11px 12px;border-bottom:1px solid #162939;color:#d5e2ec}
+.triage-badge{display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:4px;font:9px 'DM Mono',monospace;font-weight:600}
+.triage-badge.badge-isolated{background:rgba(231,111,121,.15);border:1px solid rgba(231,111,121,.4);color:#ef8d95}
+.triage-badge.badge-detour{background:rgba(245,158,11,.15);border:1px solid rgba(245,158,11,.4);color:#fbbf24}
+.triage-badge.badge-connected{background:rgba(90,200,160,.15);border:1px solid rgba(90,200,160,.4);color:#60d3a9}
+
+.science-box{background:#0e1e2d;border:1px solid #223c50;border-radius:5px;padding:16px;margin-top:14px}
+.science-box h4{font:600 13px Manrope,sans-serif;color:#e2ecf2;margin:0 0 8px}
+.science-box p{font-size:11px;color:#9cb1c1;line-height:1.7;margin:0 0 12px}
+.science-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.science-grid-2{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+.science-card{background:#0a1724;border:1px solid #1c3244;border-radius:4px;padding:12px}
+.science-card small{font:8px 'DM Mono',monospace;color:#67cce1;letter-spacing:.08em;display:block;margin-bottom:5px}
+.science-card b{font-size:13px;color:#f0f5f8;display:block}
+.science-card span{font-size:10px;color:#7c94a5;display:block;margin-top:4px}
+
+.triage-filter-bar{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}
+.triage-filter-btn{background:#0e1e2d;border:1px solid #233a4c;color:#859dae;padding:6px 12px;border-radius:4px;font:600 10px Manrope,sans-serif;cursor:pointer;transition:all .16s}
+.triage-filter-btn:hover{color:#d5e2ec;border-color:#385870}
+.triage-filter-btn.active{background:#163246;border-color:#48b9d0;color:#67cce1}
+.maplibregl-popup-content{background:#0d1d2b!important;color:#e6f0f5!important;border:1px solid #233b4e!important;border-radius:6px!important;box-shadow:0 12px 36px rgba(0,0,0,.6)!important;padding:0!important}
+.maplibregl-popup-close-button{color:#8ea3b3!important;font-size:16px!important;padding:4px 8px!important}
+.maplibregl-popup-anchor-top .maplibregl-popup-tip{border-bottom-color:#0d1d2b!important}
+.maplibregl-popup-anchor-bottom .maplibregl-popup-tip{border-top-color:#0d1d2b!important}
+.maplibregl-popup-anchor-left .maplibregl-popup-tip{border-right-color:#0d1d2b!important}
+.maplibregl-popup-anchor-right .maplibregl-popup-tip{border-left-color:#0d1d2b!important}

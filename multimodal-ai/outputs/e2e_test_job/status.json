@@ -1,5 +1,5 @@
 {
-  "job_id": "job_1793248389",
+  "job_id": "job_1793249664",
   "bbox": [
     91.5,
     26.0,
@@ -12,47 +12,47 @@
   "history": [
     {
       "state": "VALIDATING",
-      "timestamp": "2026-10-29T04:33:09.572665Z",
+      "timestamp": "2026-10-29T04:54:24.402035Z",
       "detail": "Validating bounding box and date inputs."
     },
     {
       "state": "SEARCHING_DATA",
-      "timestamp": "2026-10-29T04:33:09.576179Z",
+      "timestamp": "2026-10-29T04:54:24.406587Z",
       "detail": "Discovering Sentinel-1 pair and clear-sky Sentinel-2 metadata in Copernicus STAC."
     },
     {
       "state": "DOWNLOADING",
-      "timestamp": "2026-10-29T04:33:12.344237Z",
+      "timestamp": "2026-10-29T04:54:26.227641Z",
       "detail": "Acquiring Sentinel-1 scenes (caller-supplied or auto-downloaded from Planetary Computer STAC)."
     },
     {
       "state": "PREPROCESSING",
-      "timestamp": "2026-10-29T04:33:12.506854Z",
-      "detail": "Checked VV/VH dB values, CRS, alignment, AOI coverage; orbit/date tags incomplete; operator must verify the supplied pair."
+      "timestamp": "2026-10-29T04:54:26.394569Z",
+      "detail": "Checked VV/VH dB values, CRS, alignment, AOI coverage; orbit and event-order tags verified."
     },
     {
       "state": "FLOOD_MAPPING",
-      "timestamp": "2026-10-29T04:33:12.508823Z",
+      "timestamp": "2026-10-29T04:54:26.395575Z",
       "detail": "Running flood segmentation with DEM slope gating and temporal change screening."
     },
     {
       "state": "DAMAGE_ANALYSIS",
-      "timestamp": "2026-10-29T04:33:13.480696Z",
+      "timestamp": "2026-10-29T04:54:27.501235Z",
       "detail": "Assessing building, road, and bridge exposure using approved wording."
     },
     {
       "state": "CONNECTIVITY_ANALYSIS",
-      "timestamp": "2026-10-29T04:33:14.088533Z",
+      "timestamp": "2026-10-29T04:54:28.000580Z",
       "detail": "Calculating road access using the pre-event OSM snapshot."
     },
     {
       "state": "GENERATING_REPORT",
-      "timestamp": "2026-10-29T04:33:16.442207Z",
+      "timestamp": "2026-10-29T04:54:30.432329Z",
       "detail": "Compiling the one-page situation report and interactive map dashboard."
     },
     {
       "state": "COMPLETED",
-      "timestamp": "2026-10-29T04:33:16.728630Z",
+      "timestamp": "2026-10-29T04:54:30.686960Z",
       "detail": "Job finished successfully. Output ready in multimodal-ai\\outputs\\e2e_test_job"
     }
   ]
