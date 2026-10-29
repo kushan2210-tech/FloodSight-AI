@@ -60,6 +60,7 @@ def _settings(tmp_path, **overrides) -> Settings:
         "osm_enabled": False,
         "log_format": "text",
         "log_level": "ERROR",
+        "prediction_provider": overrides.get("prediction_provider", "trained_model"),
     }
     base.update(overrides)
     return Settings(**base)

@@ -11,7 +11,7 @@ Comprehensive test suite verifying:
 
 import numpy as np
 import pytest
-import torch
+torch = pytest.importorskip("torch", reason="PyTorch is required for neural model unit tests")
 
 from model import create_unet_model, FloodUNet
 from predict import apply_anti_hallucination_filters
@@ -259,3 +259,4 @@ def test_dem_downstream_flow_path_tracing():
     exposed = analyze_downstream_exposure(flow_coords, settlements)
     assert len(exposed) == 1
     assert exposed[0]["name"] == "Downstream Village"
+

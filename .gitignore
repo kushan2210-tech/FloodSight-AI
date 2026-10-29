@@ -39,3 +39,7 @@ multimodal-ai/**/*.ckpt
 multimodal-ai/**/*.tif
 multimodal-ai/**/*.tiff
 multimodal-ai/**/*.geotiff
+
+.venv/
+__pycache__/
+*.pyc

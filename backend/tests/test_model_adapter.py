@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-import torch
+
+torch = pytest.importorskip('torch')
 from affine import Affine
 from pyproj import CRS
 
